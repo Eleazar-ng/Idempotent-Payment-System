@@ -46,6 +46,15 @@
         "tsConfigPath": "apps/fake-processor/tsconfig.app.json"
       }
     },
+    "payments-core": {
+      "type": "library",
+      "root": "libs/payments-core",
+      "entryFile": "index",
+      "sourceRoot": "libs/payments-core/src",
+      "compilerOptions": {
+        "tsConfigPath": "libs/payments-core/tsconfig.lib.json"
+      }
+    },
     "testing": {
       "type": "library",
       "root": "libs/testing",
