@@ -1,0 +1,61 @@
+{
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "resolvePackageJsonExports": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "declaration": true,
+    "removeComments": true,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "allowSyntheticDefaultImports": true,
+    "target": "ES2023",
+    "types": [
+      "node",
+      "jest"
+    ],
+    "sourceMap": true,
+    "outDir": "./dist",
+    "rootDir": ".",
+    "incremental": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "strictPropertyInitialization": false,
+    "paths": {
+      "@app/config": [
+        "./libs/config/src"
+      ],
+      "@app/config/*": [
+        "./libs/config/src/*"
+      ],
+      "@app/db": [
+        "./libs/db/src"
+      ],
+      "@app/db/*": [
+        "./libs/db/src/*"
+      ],
+      "@app/testing": [
+        "./libs/testing/src"
+      ],
+      "@app/testing/*": [
+        "./libs/testing/src/*"
+      ]
+    }
+  },
+  "files": [],
+  "references": [
+    {
+      "path": "./apps/payments-demo/tsconfig.app.json"
+    },
+    {
+      "path": "./apps/api/tsconfig.app.json"
+    },
+    {
+      "path": "./apps/worker/tsconfig.app.json"
+    },
+    {
+      "path": "./apps/fake-processor/tsconfig.app.json"
+    }
+  ]
+}
