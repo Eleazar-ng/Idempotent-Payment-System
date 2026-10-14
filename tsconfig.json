@@ -40,6 +40,12 @@
       ],
       "@app/testing/*": [
         "./libs/testing/src/*"
+      ],
+      "defaultLibraryPrefix/payments-core": [
+        "./libs/payments-core/src"
+      ],
+      "defaultLibraryPrefix/payments-core/*": [
+        "./libs/payments-core/src/*"
       ]
     }
   },
