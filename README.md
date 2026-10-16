@@ -1,124 +1,109 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# payments-demo
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+A demo of an idempotent, double-charge-proof payment system, built stage by stage alongside the
+12-module curriculum. Stack: NestJS, PostgreSQL (SQL migrations + Kysely), BullMQ on Redis, and a
+controllable fake payment processor.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Status
 
-## Description
+| Stage | What | State |
+|---|---|---|
+| 0 | Scaffold, Docker Compose, config, test harness | **done** |
+| 1 | Schema and constraints (SQL migrations + tests that attack the database) | **done** |
+| 2 | State machine library (`payments-core`) | next |
+| 3 to 12 | Claim/replay, fake processor, outbound path, ledger posting, webhooks, outbox, retries, recovery, observability, hardening | planned |
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Layout
 
-## Project setup
-
-```bash
-$ pnpm install
+```
+apps/
+  api/              HTTP API (claim/replay path, webhook receiver later)
+  worker/           Background work: outbound calls, outbox relay, sweeper, reconciliation
+  fake-processor/   Controllable Stripe-style processor used for failure injection
+libs/
+  config/           zod-validated environment (fails fast on bad config)
+  db/               Kysely setup, DbModule, SQL migrations (libs/db/migrations)
+  payments-core/    State machine, key derivation, hashing, ledger posting (from Stage 2)
+  testing/          Testcontainers Postgres helper, test env helpers
 ```
 
-## Compile and run the project
+## Getting started
+
+Requirements: Node 22.9+ (the migrate script uses `--env-file-if-exists`), pnpm, Docker.
 
 ```bash
-# development
-$ pnpm run start
+pnpm install
+cp .env.example .env
+pnpm db:up            # Postgres 16 + Redis 7 via Docker Compose
+pnpm db:migrate       # applies libs/db/migrations to DATABASE_URL (safe to re-run)
 
-# watch mode
-$ pnpm run start:dev
+pnpm test             # unit tests (no Docker needed)
+pnpm test:int         # integration tests against a real Postgres (needs Docker)
+pnpm lint
+pnpm typecheck
+pnpm build
 
-# production mode
-$ pnpm run start:prod
+pnpm start:api              # http://localhost:3000/health
+pnpm start:fake-processor   # http://localhost:3001/health
+pnpm start:worker
 ```
 
-## Run tests
+If pnpm prints a note about ignored dependency build scripts, that is expected and safe to skip.
+
+No Docker? Point the integration tests at any Postgres 16 server instead. Each test file creates
+and drops its own uniquely named database, so the role needs `CREATEDB`:
 
 ```bash
-# unit tests
-$ pnpm run test
-
-# e2e tests
-$ pnpm run test:e2e
-
-# test coverage
-$ pnpm run test:cov
+TEST_PG_ADMIN_URL=postgres://postgres:secret@localhost:5432/postgres pnpm test:int
 ```
 
-## Deployment
+## Database design (Stage 1)
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+The schema is hand-written SQL in `libs/db/migrations`, applied in order by `libs/db/src/migrator.ts`
+(advisory lock, one transaction per file, checksum check so applied files can never be edited).
+The rules live in the database, so no code path, script or late-night `psql` session can break them:
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+| Guarantee | Mechanism |
+|---|---|
+| One intent per order per merchant | `UNIQUE (merchant_id, order_id)` |
+| API-level atomic claim, scoped per merchant | `idempotency_keys` primary key `(merchant_id, idempotency_key)` |
+| Replays return exactly the first response | completed `idempotency_keys` rows are frozen by trigger |
+| Only legal status moves | `status_transitions` + `status_initial` tables and one trigger function (`PY001`) |
+| At most one active attempt per intent (failure mode 2.7) | partial unique index `WHERE status <> 'failed'` |
+| Intent is `succeeded` only via a succeeded attempt, and never cancelled with an active attempt | triggers (`PY004`) |
+| Processor idempotency key exists before any call, globally unique, never changes | `NOT NULL UNIQUE` + immutability trigger |
+| A processor charge belongs to exactly one attempt | `UNIQUE (processor_charge_id)` |
+| Ledger is append-only | triggers, including `TRUNCATE` (`PY003`) |
+| Every ledger transaction balances per currency and is sealed at its declared entry count | deferred constraint trigger, checked at COMMIT (`PY005`) |
+| One ledger posting per business event | `UNIQUE (posting_key)` |
+| An entry's currency must match its account's | composite foreign key `(account_id, currency)` |
 
-```bash
-$ pnpm install -g @nestjs/mau
-$ mau deploy
-```
+Custom SQLSTATE codes (`PY001` to `PY005`) let application code tell "the database refused this on
+purpose" from ordinary failures. Unique violations are the standard `23505`.
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+### Two deliberate differences from the lectures
 
-## Observability
+1. **`abandoned` attempts block new attempts** (Module 5.11 excluded them from the unique index).
+   `abandoned` means "outcome unknown", and reconciliation may still find it succeeded, so allowing a
+   new attempt in the meantime could double charge. The customer waits for reconciliation instead.
+2. **`refunded` and `disputed` are not attempt states** (Module 8.8: refunds are their own entity).
+   Also added: `calling_processor -> requires_action`, because a processor can ask for 3-D Secure in
+   the response to the charge call itself.
 
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
+## Why these versions
 
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
+- **NestJS 11, not 12.** NestJS 12 is ESM-only. That breaks Jest and the `@app/*` path aliases at
+  runtime without extra loader tooling, which is noise for a learning project. Revisit later.
+- **Kysely 0.28, not 0.29.** 0.29 is ESM-only; 0.28 ships a CommonJS build.
+- **TypeScript 5.9, not 7.** TS 7 removed `moduleResolution: node10` and breaks the Nest CLI and
+  ts-jest, which both use the TypeScript JS API.
 
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
+## Conventions that matter for later stages
 
-To add it to this project:
-
-```bash
-$ pnpm install @nestjs/observe
-```
-
-Then follow the [setup guide](https://docs.nestjs.com/observability/overview) - it takes a single import and an app key.
-
-The free plan needs no payment details and covers 300,000 events a month. You can also browse the [live demo](https://www.observe-demo.nestjs.com/dashboard) first - the whole dashboard over a busy service's data, with nothing to install.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observe](https://observe.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+- **Real Postgres in tests, never mocks.** The guarantees (unique constraints, partial indexes,
+  triggers, row locks) only exist in a real database.
+- **`rawBody: true`** is set via `NEST_APP_OPTIONS` in `apps/api/src/bootstrap.ts`, so webhook
+  signatures can be verified against the exact bytes received (Stage 7). A test guards it.
+- **Test env vars** are set in `jest.setup-env.js`, before modules load, because
+  `ConfigModule.forRoot()` snapshots `process.env` at import time.
+- **Schema is hand-written SQL** in `libs/db/migrations`; Kysely is only the query layer.
