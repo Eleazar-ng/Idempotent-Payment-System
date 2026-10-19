@@ -10,8 +10,9 @@ controllable fake payment processor.
 |---|---|---|
 | 0 | Scaffold, Docker Compose, config, test harness | **done** |
 | 1 | Schema and constraints (SQL migrations + tests that attack the database) | **done** |
-| 2 | State machine library (`payments-core`) | next |
-| 3 to 12 | Claim/replay, fake processor, outbound path, ledger posting, webhooks, outbox, retries, recovery, observability, hardening | planned |
+| 2 | State machine library (`payments-core`) and the conditional-update helper | **done** |
+| 3 | Claim and replay path: canonical request hashing, atomic claim, replay | next |
+| 4 to 12 | Fake processor, outbound path, ledger posting, webhooks, outbox, retries, recovery, observability, hardening | planned |
 
 ## Layout
 
@@ -80,6 +81,31 @@ The rules live in the database, so no code path, script or late-night `psql` ses
 
 Custom SQLSTATE codes (`PY001` to `PY005`) let application code tell "the database refused this on
 purpose" from ordinary failures. Unique violations are the standard `23505`.
+
+## State machines (Stage 2)
+
+The payment state machines exist twice, on purpose, and a test keeps the copies identical:
+
+| Layer | Where | Job |
+|---|---|---|
+| Application | `libs/payments-core` (`attemptMachine`, `intentMachine`) | Fail fast before any query; answer questions like "which statuses may precede `succeeded`?" |
+| Database | `status_transitions` table and trigger (migration 0002) | The guarantee that holds even if application code is wrong or bypassed |
+
+`libs/db/src/state-machine-drift.int-spec.ts` fails if the TypeScript tables, the SQL tables, the
+terminal states, or the "one active attempt per intent" rule ever disagree.
+
+`transitionAttempt(db, attemptId, to, { from, ... })` in `libs/db` is the only way application code
+should change an attempt's status. It is one `UPDATE ... WHERE status IN (from)` and says what happened:
+
+| Outcome | Meaning |
+|---|---|
+| `applied` | This call moved the attempt. Exactly one concurrent caller can get this. |
+| `already_applied` | It was already in the target status (duplicate webhook, retry or redelivery). Not an error. |
+| `stale` | It is in a different status than expected; someone else moved it first. Nothing changed. |
+| `not_found` | No such attempt. |
+
+It accepts a transaction as well as a connection, so a status change and its ledger posting can commit
+together (Stage 6).
 
 ### Two deliberate differences from the lectures
 
