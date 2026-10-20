@@ -41,6 +41,17 @@ export async function startMigratedPostgres(): Promise<TestPostgres> {
   return pg;
 }
 
+/**
+ * pool.end() returns before every socket has fully closed, so dropping the database right after can
+ * terminate a connection that is still closing. That is expected during teardown and must not
+ * surface as an error in whichever test happens to be running; at any other time it is logged.
+ */
+function poolErrorHandler(teardown: { stopping: boolean }): (error: Error) => void {
+  return (error) => {
+    if (!teardown.stopping) console.error('[test db] idle connection error:', error.message);
+  };
+}
+
 async function startContainer(): Promise<TestPostgres> {
   const container: StartedPostgreSqlContainer = await new PostgreSqlContainer('postgres:16-alpine')
     .withDatabase('payments_test')
@@ -49,12 +60,14 @@ async function startContainer(): Promise<TestPostgres> {
     .start();
 
   const connectionString = container.getConnectionUri();
-  const db = createDb(connectionString, { maxConnections: 20 });
+  const teardown = { stopping: false };
+  const db = createDb(connectionString, { maxConnections: 20, onPoolError: poolErrorHandler(teardown) });
 
   return {
     connectionString,
     db,
     stop: async () => {
+      teardown.stopping = true;
       await db.destroy();
       await container.stop();
     },
@@ -75,12 +88,14 @@ async function startOnExistingServer(adminUrl: string): Promise<TestPostgres> {
   const url = new URL(adminUrl);
   url.pathname = `/${dbName}`;
   const connectionString = url.toString();
-  const db = createDb(connectionString, { maxConnections: 20 });
+  const teardown = { stopping: false };
+  const db = createDb(connectionString, { maxConnections: 20, onPoolError: poolErrorHandler(teardown) });
 
   return {
     connectionString,
     db,
     stop: async () => {
+      teardown.stopping = true;
       await db.destroy();
       const cleanup = new Client({ connectionString: adminUrl });
       await cleanup.connect();

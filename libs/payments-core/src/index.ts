@@ -3,3 +3,7 @@ export * from './payments-core.service';
 export * from './errors';
 export * from './state-machine';
 export * from './payment-states';
+export * from './canonical-json';
+export * from './request-hash';
+export * from './idempotency-key';
+export * from './idempotency-http';

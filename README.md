@@ -11,8 +11,9 @@ controllable fake payment processor.
 | 0 | Scaffold, Docker Compose, config, test harness | **done** |
 | 1 | Schema and constraints (SQL migrations + tests that attack the database) | **done** |
 | 2 | State machine library (`payments-core`) and the conditional-update helper | **done** |
-| 3 | Claim and replay path: canonical request hashing, atomic claim, replay | next |
-| 4 to 12 | Fake processor, outbound path, ledger posting, webhooks, outbox, retries, recovery, observability, hardening | planned |
+| 3 | Claim and replay path: canonical request hashing, atomic claim, replay | **done** |
+| 4 | Fake processor (controllable failure injection) | next |
+| 5 to 12 | Outbound path, ledger posting, webhooks, outbox, retries, recovery, observability, hardening | planned |
 
 ## Layout
 
@@ -24,7 +25,7 @@ apps/
 libs/
   config/           zod-validated environment (fails fast on bad config)
   db/               Kysely setup, DbModule, SQL migrations (libs/db/migrations)
-  payments-core/    State machine, key derivation, hashing, ledger posting (from Stage 2)
+  payments-core/    State machines, canonical request hashing, key rules (later: ledger posting)
   testing/          Testcontainers Postgres helper, test env helpers
 ```
 
@@ -116,6 +117,45 @@ together (Stage 6).
    Also added: `calling_processor -> requires_action`, because a processor can ask for 3-D Secure in
    the response to the charge call itself.
 
+## Idempotency keys (Stage 3)
+
+Every request that moves money carries a client `Idempotency-Key`. Two pieces handle it:
+
+| Piece | Where | Job |
+|---|---|---|
+| Canonical hashing | `libs/payments-core` (`canonicalize`, `requestHasher`) | Same meaning gives the same hash: keys sorted, no whitespace, strict about values with no single form (`undefined`, `NaN`, `Date`...). The hash covers the operation as well as the body, and is stored with its **version**. |
+| Claim and replay | `libs/db` (`claimKey`, `completeKey`, `releaseClaim`) | One `INSERT ... ON CONFLICT DO NOTHING` decides who is first. Everyone else is told what happened. |
+
+`claimKey` returns one of four outcomes. Exactly one concurrent caller per key ever gets `claimed`:
+
+| Outcome | Meaning | HTTP |
+|---|---|---|
+| `claimed` | First time this key is seen; do the work, then `completeKey()` | (continue) |
+| `replay` | Same request already finished; return the stored response unchanged | stored status and body |
+| `in_flight` | Same request still being processed elsewhere | 409 + Retry-After |
+| `mismatch` | Same key, different request (checked first, even after completion) | 422 |
+
+`completeKey` is first-write-wins: a second call changes nothing and returns the original response, which
+is the one the caller must send. `releaseClaim` abandons a claim only when no attempt is linked yet.
+
+### Rules for callers
+
+- **Claim on the pool (autocommit), not inside a long transaction.** The claim must be visible to other
+  requests immediately. (A test shows what happens otherwise: duplicates block behind the open transaction.)
+  `completeKey` is the opposite: pass a transaction so the response commits with the work it describes.
+- **Never edit `hashV1`.** Rows already exist that were hashed with it, and a known-answer test pins it.
+  To change hashing, add version 2 beside it. **Deploy order matters:** ship builds that can *read*
+  version 2 everywhere before any build starts *writing* it, because a build that meets a version it does
+  not know throws `UnknownHashVersionError` instead of guessing.
+- A claim whose request crashes before `completeKey` stays `in_flight` until recovery (Stage 9) deals with it;
+  `in_flight` results carry `created_at` so that stage can recognise a stuck claim.
+
+### Deliberate differences from the lectures
+
+1. The hash covers **operation + body**, not the body alone, so one key cannot be replayed against another
+   endpoint that accepts the same body.
+2. Key validation is stricter than the database: visible ASCII only, 1 to 255 characters.
+
 ## Why these versions
 
 - **NestJS 11, not 12.** NestJS 12 is ESM-only. That breaks Jest and the `@app/*` path aliases at
@@ -132,4 +172,6 @@ together (Stage 6).
   signatures can be verified against the exact bytes received (Stage 7). A test guards it.
 - **Test env vars** are set in `jest.setup-env.js`, before modules load, because
   `ConfigModule.forRoot()` snapshots `process.env` at import time.
+- **The pool never crashes the process.** `createDb` listens for errors on idle connections (`onPoolError`),
+  because node-postgres otherwise turns a dead idle connection into an unhandled error.
 - **Schema is hand-written SQL** in `libs/db/migrations`; Kysely is only the query layer.
