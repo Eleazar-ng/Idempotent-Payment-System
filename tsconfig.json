@@ -41,10 +41,10 @@
       "@app/testing/*": [
         "./libs/testing/src/*"
       ],
-      "defaultLibraryPrefix/payments-core": [
+      "@app/payments-core": [
         "./libs/payments-core/src"
       ],
-      "defaultLibraryPrefix/payments-core/*": [
+      "@app/payments-core/*": [
         "./libs/payments-core/src/*"
       ]
     }
