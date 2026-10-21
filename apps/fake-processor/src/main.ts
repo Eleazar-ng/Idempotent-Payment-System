@@ -5,9 +5,8 @@ import type { Env } from '@app/config';
 import { FakeProcessorModule } from './fake-processor.module';
 
 /**
- * A controllable stand-in for a payment processor (Stripe-style contract).
- * Stage 0 only exposes a health endpoint. The charge endpoint, idempotency window,
- * failure switches and signed webhooks are built in Stage 4.
+ * A controllable stand-in for a payment processor (Stripe-style contract): charges with an
+ * idempotency window, failure switches, signed webhooks, and a /_control API to drive them.
  */
 async function main(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(FakeProcessorModule, { rawBody: true });

@@ -18,6 +18,8 @@ export const envSchema = z.object({
   PROCESSOR_BASE_URL: z.string().min(1).default('http://localhost:3001'),
   /** Shared secret used to sign and verify webhooks (Stage 4 and Stage 7). */
   PROCESSOR_WEBHOOK_SECRET: z.string().min(16, 'PROCESSOR_WEBHOOK_SECRET must be at least 16 chars'),
+  /** Optional: where the fake processor delivers webhooks at start-up (can also be set at runtime). */
+  FAKE_PROCESSOR_WEBHOOK_URL: z.string().min(1).optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

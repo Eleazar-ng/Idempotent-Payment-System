@@ -12,8 +12,9 @@ controllable fake payment processor.
 | 1 | Schema and constraints (SQL migrations + tests that attack the database) | **done** |
 | 2 | State machine library (`payments-core`) and the conditional-update helper | **done** |
 | 3 | Claim and replay path: canonical request hashing, atomic claim, replay | **done** |
-| 4 | Fake processor (controllable failure injection) | next |
-| 5 to 12 | Outbound path, ledger posting, webhooks, outbox, retries, recovery, observability, hardening | planned |
+| 4 | Fake processor: charges, idempotency window, failure rules, signed webhooks | **done** |
+| 5 | Create-payment API and the outbound processor call | next |
+| 6 to 12 | Ledger posting, webhooks, outbox, retries, recovery, observability, hardening | planned |
 
 ## Layout
 
@@ -21,7 +22,7 @@ controllable fake payment processor.
 apps/
   api/              HTTP API (claim/replay path, webhook receiver later)
   worker/           Background work: outbound calls, outbox relay, sweeper, reconciliation
-  fake-processor/   Controllable Stripe-style processor used for failure injection
+  fake-processor/   Controllable Stripe-style processor (in memory) used for failure injection
 libs/
   config/           zod-validated environment (fails fast on bad config)
   db/               Kysely setup, DbModule, SQL migrations (libs/db/migrations)
@@ -155,6 +156,64 @@ is the one the caller must send. `releaseClaim` abandons a claim only when no at
 1. The hash covers **operation + body**, not the body alone, so one key cannot be replayed against another
    endpoint that accepts the same body.
 2. Key validation is stricter than the database: visible ASCII only, 1 to 255 characters.
+
+## Fake processor (Stage 4)
+
+`apps/fake-processor` (`pnpm start:fake-processor`, port 3001) behaves like a Stripe-style processor and can
+be told to misbehave, so every failure from Module 2 can be reproduced on demand. It is in memory and shares
+nothing with our database, because it is someone else's system.
+
+**Its public API** (what our payment code calls):
+
+| Request | Behaviour |
+|---|---|
+| `POST /v1/charges` + `Idempotency-Key` | Creates a charge. Same key and same parameters inside 24 h replays the stored response (`Idempotent-Replayed: true`); same key, different parameters is a 400; same key while the first is still running is a 409. A decline is a 402 and is stored too. |
+| `GET /v1/charges/:id` | The charge as it is now. |
+| `GET /v1/charges?reference=...` | Lookup by `metadata.reference`: how reconciliation finds a charge whose id we never received. |
+
+Magic `source` values need no setup: `tok_declined`, `tok_insufficient_funds`, `tok_requires_action`, `tok_pending`.
+
+**Failure rules** (`POST /_control/rules`) combine a *match* (`source`, `reference`, `idempotencyKey`) with what to do.
+A rule applies once by default (fail once, then recover); `times: null` means forever.
+
+| Field | Effect |
+|---|---|
+| `outcome` | `succeed`, `decline`, `requires_action`, `pending`. What the charge itself does; used the first time a key is processed. |
+| `fault: gateway_error` | 503 before the processor sees anything. No charge. |
+| `fault: drop_before` | Connection killed before processing. No charge. |
+| `fault: error_after` | Charge made and stored, but the response is a 500. |
+| `fault: drop_after` | Charge made and stored, connection closed with no response. The classic double-charge trap. |
+| `processingDelayMs` | Slow **before** the charge, key marked in progress (duplicates get 409). |
+| `responseDelayMs` | Slow **after** the charge: the client times out although the money moved. |
+
+**Other controls:** `POST /_control/charges/:id/resolve` settles a `pending` / `requires_action` charge;
+`POST /_control/clock/advance {ms}` expires idempotency keys; `GET /_control/stats`; `POST /_control/reset`.
+
+**Webhooks** are signed `Processor-Signature: t=<unix>,v1=<hmac-sha256 of "<t>.<raw body>">` using
+`PROCESSOR_WEBHOOK_SECRET`, and are delivered at least once. `PUT /_control/webhook` sets the target URL,
+`duplicates` (extra copies), `maxRetries` / `retryDelayMs` (re-send after a non-2xx), and `mode: "hold"`, which
+keeps events until `POST /_control/webhook/flush {order: "fifo" | "reverse"}` so they can arrive out of order.
+`GET /_control/events` shows every event and every delivery attempt; `POST /_control/events/:id/redeliver` resends one.
+Signing and verification live in `libs/payments-core` (`signWebhook`, `verifyWebhook`), so the receiver in Stage 7
+uses exactly the same code the processor signs with.
+
+Try the worst case by hand:
+
+```bash
+curl -s -XPOST localhost:3001/_control/rules -H 'content-type: application/json' -d '{"fault":"drop_after"}'
+curl -si -XPOST localhost:3001/v1/charges -H 'idempotency-key: demo-1' -H 'content-type: application/json' \
+  -d '{"amount":5000,"currency":"NGN","metadata":{"reference":"ord_1"}}'   # connection reset, no response
+curl -s "localhost:3001/v1/charges?reference=ord_1"                          # ...but the charge exists
+curl -si -XPOST localhost:3001/v1/charges -H 'idempotency-key: demo-1' -H 'content-type: application/json' \
+  -d '{"amount":5000,"currency":"NGN","metadata":{"reference":"ord_1"}}'   # replay: same charge, no second one
+```
+
+### Deliberate differences from the lectures
+
+1. Rules apply per HTTP request. A rule's `outcome` only matters the first time a key is processed (a replay returns what
+   was stored), but its `fault` can hit replays too, and it counts as one use either way.
+2. The replay of a `pending` charge's original request keeps returning `pending` after the charge settles, as a real
+   processor does. Only a fresh read or the webhook shows the new status, which is what Stage 9 reconciliation relies on.
 
 ## Why these versions
 
