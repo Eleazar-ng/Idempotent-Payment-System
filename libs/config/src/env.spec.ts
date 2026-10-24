@@ -12,6 +12,13 @@ describe('loadEnv', () => {
     expect(env.API_PORT).toBe(3000);
     expect(env.FAKE_PROCESSOR_PORT).toBe(3001);
     expect(env.NODE_ENV).toBe('development');
+    expect(env.PROCESSOR_TIMEOUT_MS).toBe(5000);
+    expect(env.PROCESSOR_CALL_RETRIES).toBe(2);
+    expect(env.PROCESSOR_RETRY_DELAY_MS).toBe(200);
+  });
+
+  it('refuses an unreasonable number of call retries', () => {
+    expect(() => loadEnv({ ...valid, PROCESSOR_CALL_RETRIES: '50' })).toThrow(/PROCESSOR_CALL_RETRIES/);
   });
 
   it('coerces numeric strings, since process.env values are always strings', () => {

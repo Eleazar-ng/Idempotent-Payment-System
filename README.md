@@ -13,14 +13,15 @@ controllable fake payment processor.
 | 2 | State machine library (`payments-core`) and the conditional-update helper | **done** |
 | 3 | Claim and replay path: canonical request hashing, atomic claim, replay | **done** |
 | 4 | Fake processor: charges, idempotency window, failure rules, signed webhooks | **done** |
-| 5 | Create-payment API and the outbound processor call | next |
-| 6 to 12 | Ledger posting, webhooks, outbox, retries, recovery, observability, hardening | planned |
+| 5 | Create-payment API and the outbound processor call | **done** |
+| 6 | Ledger posting, atomic with the success transition | next |
+| 7 to 12 | Webhooks, outbox, retries, recovery, observability, hardening | planned |
 
 ## Layout
 
 ```
 apps/
-  api/              HTTP API (claim/replay path, webhook receiver later)
+  api/              HTTP API: create and read payments (webhook receiver from Stage 7)
   worker/           Background work: outbound calls, outbox relay, sweeper, reconciliation
   fake-processor/   Controllable Stripe-style processor (in memory) used for failure injection
 libs/
@@ -76,6 +77,7 @@ The rules live in the database, so no code path, script or late-night `psql` ses
 | Intent is `succeeded` only via a succeeded attempt, and never cancelled with an active attempt | triggers (`PY004`) |
 | Processor idempotency key exists before any call, globally unique, never changes | `NOT NULL UNIQUE` + immutability trigger |
 | A processor charge belongs to exactly one attempt | `UNIQUE (processor_charge_id)` |
+| A retry can rebuild the identical charge request | `payment_source` is `NOT NULL` and immutable (migration 0005) |
 | Ledger is append-only | triggers, including `TRUNCATE` (`PY003`) |
 | Every ledger transaction balances per currency and is sealed at its declared entry count | deferred constraint trigger, checked at COMMIT (`PY005`) |
 | One ledger posting per business event | `UNIQUE (posting_key)` |
@@ -214,6 +216,65 @@ curl -si -XPOST localhost:3001/v1/charges -H 'idempotency-key: demo-1' -H 'conte
    was stored), but its `fault` can hit replays too, and it counts as one use either way.
 2. The replay of a `pending` charge's original request keeps returning `pending` after the charge settles, as a real
    processor does. Only a fresh read or the webhook shows the new status, which is what Stage 9 reconciliation relies on.
+
+## Create-payment flow (Stage 5)
+
+`POST /v1/payments` (headers `X-Merchant-Id` and `Idempotency-Key`; body `order_id`, `amount` in minor units,
+`currency`, `source`) and `GET /v1/payments/:id`. `X-Merchant-Id` stands in for real authentication (Stage 11);
+every query is already scoped to the merchant.
+
+```
+claim the key ──► begin attempt for the order ──► created → calling_processor (committed) ──► call processor
+   (Stage 3)            (index: one active)                  (Stage 2)                        (derived key)
+                                                                                                   │
+                    response stored under the key  ◄── apply outcome, one transaction ◄───────────┘
+```
+
+Two different doors stop a double charge. **Same key twice:** the key claim (Stage 3). **Different keys, same order:**
+the partial unique index on active attempts, reached through `beginAttempt`. Either way only one request can ever
+start an attempt, and the attempt's processor key (`pi_<intent>_a<n>`) is derived and stored before any call.
+
+What the processor's answer means (`classifyChargeResponse`), and what the flow does about it:
+
+| Processor said | Meaning | Attempt becomes | API replies |
+|---|---|---|---|
+| charge `succeeded` | paid | `succeeded` (database marks the intent paid) | 201 |
+| charge `pending` | still working | `processing` | 202 |
+| `requires_action` | customer must do something | `requires_action` | 200 |
+| 402 / charge `failed` | card refused, money did not move | `failed` | 402, a new attempt is allowed |
+| other 4xx | the processor refused **our request** | `failed` (`processor_rejected:...`) | 502 |
+| timeout, dropped connection, 5xx, 409, 429, malformed | **we do not know whether money moved** | unchanged | retried with the same key, then 202 |
+
+The last row is the whole point. An unknown outcome is never a failure: failing the attempt would let a customer pay
+twice. It is retried (`PROCESSOR_CALL_RETRIES`, default 2, doubling pause) with the identical key, which the processor
+collapses into one charge. If it stays unknown the attempt remains `calling_processor`, the API answers `202 processing`,
+and the unresolved attempt itself blocks any new payment for the order (409) until recovery resolves it (Stage 9).
+
+| Request outcome | Status | Stored under the key? |
+|---|---|---|
+| Same key, same request, finished | stored answer + `Idempotent-Replayed: true` | already |
+| Same key, still running | 409 + `Retry-After` | no |
+| Same key, different request | 422 | no |
+| Order busy (another attempt not finished) | 409 `payment_already_in_progress` | **no, the key is released** so a later retry works |
+| Order already paid / amount mismatch / canceled | 409 / 422 / 409 | yes (permanent answers) |
+| Declined, paid, pending, requires action, outage | as in the table above | yes (a replay returns the same answer; use a **new key** to try again) |
+
+### Known gaps, by design
+
+- A `pending` or `requires_action` attempt stays that way until the webhook handler (Stage 7).
+- Success does not post to the ledger yet; `settle()` in `payments.service.ts` is the transaction Stage 6 extends.
+- If the process dies after an attempt exists but before the response is stored, the key stays in flight until the
+  recovery sweeper (Stage 9). Before an attempt exists the claim is released instead.
+- Retry pauses are a plain doubling with no jitter; Stage 8 replaces them with a real policy.
+
+### Deliberate differences from the lectures
+
+1. The payment source is stored on the attempt (migration 0005). The lectures hashed and sent it but never stored it,
+   which would make a retry from a worker send a different request than the original.
+2. Busy-order answers are not stored, but permanent ones are. The lectures stored every response; doing that for a
+   transient 409 would tell a client "in progress" forever.
+3. `rejected` (the processor refused our request) is separate from `declined` (the card was refused), because only one
+   of them is the customer's problem.
 
 ## Why these versions
 

@@ -5,3 +5,4 @@ export * from './db.service';
 export * from './migrator';
 export * from './attempts';
 export * from './idempotency';
+export * from './payments';

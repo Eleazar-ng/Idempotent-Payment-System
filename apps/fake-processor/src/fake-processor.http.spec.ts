@@ -221,6 +221,7 @@ describe('fake processor over HTTP', () => {
       expect((await control('GET', '/stats')).body).toEqual({
         charges: 2,
         idempotencyKeys: 2,
+        replays: 0,
         byStatus: { succeeded: 1, failed: 1 },
       });
     });

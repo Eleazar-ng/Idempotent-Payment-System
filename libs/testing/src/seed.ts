@@ -42,6 +42,7 @@ export async function createAttempt(
       attempt_number: attemptNumber,
       // Derived from the intent id (globally unique), as the 0001 migration recommends.
       processor_idempotency_key: `pi_${intentId}_a${attemptNumber}_${uid()}`,
+      payment_source: 'tok_test',
     })
     .returning('id')
     .executeTakeFirstOrThrow();

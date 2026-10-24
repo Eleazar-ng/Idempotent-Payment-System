@@ -11,7 +11,7 @@ import {
   startMigratedPostgres,
   TestPostgres,
   uid,
-} from '../../testing/src';
+} from '@app/testing';
 
 /**
  * Stage 1.3: failure mode 2.7 ("two attempts for one order both succeed") made structurally
@@ -129,7 +129,7 @@ describe('schema: attempt and intent integrity (0003)', () => {
       await expectSqlState(
         pg.db
           .insertInto('payment_attempts')
-          .values({ payment_intent_id: 999_999_999, attempt_number: 1, processor_idempotency_key: `k-${uid()}` })
+          .values({ payment_intent_id: 999_999_999, attempt_number: 1, processor_idempotency_key: `k-${uid()}`, payment_source: 'tok_test' })
           .execute(),
         PG.INTEGRITY,
         /missing/,

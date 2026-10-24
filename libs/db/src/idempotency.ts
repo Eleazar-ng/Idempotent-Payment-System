@@ -1,7 +1,7 @@
 import { sql } from 'kysely';
 import type { Kysely } from 'kysely';
-import { assertValidIdempotencyKey, requestHasher } from '../../payments-core/src';
-import type { RequestFingerprint, RequestHasher } from '../../payments-core/src';
+import { assertValidIdempotencyKey, requestHasher } from '@app/payments-core';
+import type { RequestFingerprint, RequestHasher } from '@app/payments-core';
 import type { Database, IdempotencyKey, Json } from './database.types';
 
 /** The response a completed request produced; what every duplicate gets back, byte for meaning. */
@@ -209,4 +209,29 @@ export async function releaseClaim(db: Kysely<Database>, merchantId: number, key
     .where('attempt_id', 'is', null)
     .executeTakeFirst();
   return Number(result.numDeletedRows) > 0;
+}
+
+/**
+ * Records which payment attempt a claimed key produced, in the same transaction that creates the
+ * attempt. From this moment `releaseClaim` refuses to delete the claim: money may be about to move,
+ * so the key must stay until the request completes or recovery resolves it.
+ *
+ * Returns false if the key is already completed, or already linked to a different attempt.
+ */
+export async function attachAttempt(
+  db: Kysely<Database>,
+  merchantId: number,
+  key: string,
+  attemptId: number,
+): Promise<boolean> {
+  assertValidIdempotencyKey(key);
+  const result = await db
+    .updateTable('idempotency_keys')
+    .set({ attempt_id: attemptId })
+    .where('merchant_id', '=', merchantId)
+    .where('idempotency_key', '=', key)
+    .where('completed_at', 'is', null)
+    .where((eb) => eb.or([eb('attempt_id', 'is', null), eb('attempt_id', '=', attemptId)]))
+    .executeTakeFirst();
+  return Number(result.numUpdatedRows) > 0;
 }
