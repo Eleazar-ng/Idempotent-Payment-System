@@ -16,6 +16,12 @@ export const envSchema = z.object({
 
   /** Where the API/worker send outbound charge calls (the fake processor in dev). */
   PROCESSOR_BASE_URL: z.string().min(1).default('http://localhost:3001'),
+  /** How long to wait for the processor before treating the outcome as unknown (not as a failure). */
+  PROCESSOR_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+  /** Extra tries after an UNKNOWN outcome, always with the same processor idempotency key. */
+  PROCESSOR_CALL_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
+  /** First pause between those tries; doubles each time. */
+  PROCESSOR_RETRY_DELAY_MS: z.coerce.number().int().min(0).default(200),
   /** Shared secret used to sign and verify webhooks (Stage 4 and Stage 7). */
   PROCESSOR_WEBHOOK_SECRET: z.string().min(16, 'PROCESSOR_WEBHOOK_SECRET must be at least 16 chars'),
   /** Optional: where the fake processor delivers webhooks at start-up (can also be set at runtime). */

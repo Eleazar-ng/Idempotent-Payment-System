@@ -11,7 +11,7 @@ import {
   setAttemptStatus,
   startMigratedPostgres,
   TestPostgres,
-} from '../../testing/src';
+} from '@app/testing';
 
 /**
  * Stage 1.2: the state machine, enforced by the database.
@@ -92,6 +92,7 @@ describe('schema: status transitions (0002)', () => {
             payment_intent_id: intentId,
             attempt_number: 1,
             processor_idempotency_key: 'skip-the-machine',
+            payment_source: 'tok_test',
             status: 'succeeded',
             processor_charge_id: 'ch_forged',
           })
@@ -111,6 +112,7 @@ describe('schema: status transitions (0002)', () => {
             payment_intent_id: intentId,
             attempt_number: 1,
             processor_idempotency_key: 'bogus-status',
+            payment_source: 'tok_test',
             status: 'bogus' as never,
           })
           .execute(),

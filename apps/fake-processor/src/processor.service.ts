@@ -93,6 +93,7 @@ export class ProcessorService {
   private records = new Map<string, IdempotencyRecord>();
   private rules: Rule[] = [];
   private clockOffsetMs = 0;
+  private replays = 0;
 
   constructor(private readonly webhooks: WebhookService) {}
 
@@ -172,6 +173,7 @@ export class ProcessorService {
           'A request with this key is still being processed. Retry shortly.',
         );
       }
+      this.replays++;
       return {
         action: 'respond',
         ...existing.response,
@@ -306,10 +308,10 @@ export class ProcessorService {
     return rule && { ...rule };
   }
 
-  stats(): { charges: number; idempotencyKeys: number; byStatus: Record<string, number> } {
+  stats(): { charges: number; idempotencyKeys: number; replays: number; byStatus: Record<string, number> } {
     const byStatus: Record<string, number> = {};
     for (const c of this.charges.values()) byStatus[c.status] = (byStatus[c.status] ?? 0) + 1;
-    return { charges: this.charges.size, idempotencyKeys: this.records.size, byStatus };
+    return { charges: this.charges.size, idempotencyKeys: this.records.size, replays: this.replays, byStatus };
   }
 
   reset(): void {
@@ -317,6 +319,7 @@ export class ProcessorService {
     this.records.clear();
     this.rules = [];
     this.clockOffsetMs = 0;
+    this.replays = 0;
     this.webhooks.reset();
   }
 }

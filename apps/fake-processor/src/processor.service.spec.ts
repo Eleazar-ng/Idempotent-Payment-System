@@ -63,7 +63,7 @@ describe('fake processor: charges and the idempotency window (4.1)', () => {
       expect(second.body).toEqual(first.body);
       expect(second.headers).toEqual({ 'Idempotent-Replayed': 'true' });
       expect(first.headers).toEqual({});
-      expect(processor.stats().charges).toBe(1);
+      expect(processor.stats()).toMatchObject({ charges: 1, replays: 1 });
     });
 
     it('treats reordered but identical parameters as the same request', async () => {

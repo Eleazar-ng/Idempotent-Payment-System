@@ -54,6 +54,8 @@ export interface PaymentAttemptsTable {
   attempt_number: number;
   status: Generated<PaymentAttemptStatus>;
   processor_idempotency_key: string;
+  /** The payment method token for this attempt; immutable, so retries can rebuild the identical request. */
+  payment_source: string;
   processor_charge_id: Nullable<string>;
   failure_reason: Nullable<string>;
   created_at: Generated<Date>;

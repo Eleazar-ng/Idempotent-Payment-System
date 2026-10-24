@@ -9,7 +9,7 @@ import {
   startMigratedPostgres,
   TestPostgres,
   uid,
-} from '../../testing/src';
+} from '@app/testing';
 
 /** Stage 1.1: the core tables, their basic constraints, and the helper triggers. */
 describe('schema: core tables (0001)', () => {
@@ -126,16 +126,35 @@ describe('schema: core tables (0001)', () => {
 
       await pg.db
         .insertInto('payment_attempts')
-        .values({ payment_intent_id: intentA, attempt_number: 1, processor_idempotency_key: key })
+        .values({ payment_intent_id: intentA, attempt_number: 1, processor_idempotency_key: key , payment_source: 'tok_test' })
         .execute();
 
       await expectSqlState(
         pg.db
           .insertInto('payment_attempts')
-          .values({ payment_intent_id: intentB, attempt_number: 1, processor_idempotency_key: key })
+          .values({ payment_intent_id: intentB, attempt_number: 1, processor_idempotency_key: key , payment_source: 'tok_test' })
           .execute(),
         PG.UNIQUE_VIOLATION,
         /payment_attempts_processor_key_unique/,
+      );
+    });
+
+    it('requires a payment source, and never lets it change after insert (retries must rebuild the same request)', async () => {
+      const intentId = await createIntent(pg.db, merchantId);
+      await expectSqlState(
+        pg.db
+          .insertInto('payment_attempts')
+          .values({ payment_intent_id: intentId, attempt_number: 1, processor_idempotency_key: `k-${uid()}`, payment_source: '' })
+          .execute(),
+        PG.CHECK_VIOLATION,
+        /payment_attempts_source_length/,
+      );
+
+      const attemptId = await createAttempt(pg.db, intentId);
+      await expectSqlState(
+        pg.db.updateTable('payment_attempts').set({ payment_source: 'tok_other' }).where('id', '=', attemptId).execute(),
+        PG.IMMUTABLE_COLUMN,
+        /payment_source is immutable/,
       );
     });
 
@@ -144,7 +163,7 @@ describe('schema: core tables (0001)', () => {
       await expectSqlState(
         pg.db
           .insertInto('payment_attempts')
-          .values({ payment_intent_id: intentId, attempt_number: 1, processor_idempotency_key: '' })
+          .values({ payment_intent_id: intentId, attempt_number: 1, processor_idempotency_key: '' , payment_source: 'tok_test' })
           .execute(),
         PG.CHECK_VIOLATION,
       );
