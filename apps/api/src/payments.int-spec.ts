@@ -1,7 +1,7 @@
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
 import type { Kysely } from 'kysely';
-import { createDb, DB } from '@app/db';
+import { checkLedgerInvariants, createDb, DB } from '@app/db';
 import type { Database } from '@app/db';
 import { createMerchant, startMigratedPostgres, TestPostgres, uid } from '@app/testing';
 import { FakeProcessorModule } from '../../fake-processor/src/fake-processor.module';
@@ -41,7 +41,7 @@ describe('POST /v1/payments (API + Postgres + fake processor)', () => {
       .overrideProvider(PROCESSOR_CLIENT_OPTIONS)
       .useValue({ baseUrl: processorBase, timeoutMs: 300 })
       .overrideProvider(PAYMENT_FLOW_OPTIONS)
-      .useValue({ callRetries: 2, retryDelayMs: 5 })
+      .useValue({ callRetries: 2, retryDelayMs: 5, feeBps: 150 })
       .compile();
     api = apiModule.createNestApplication<NestExpressApplication>({ logger: false });
     await api.listen(0, '127.0.0.1');
@@ -55,6 +55,12 @@ describe('POST /v1/payments (API + Postgres + fake processor)', () => {
   });
 
   let merchantId: number;
+
+  // Whatever a test did, the books must still be sound: every success booked, nothing booked
+  // without one, debits equal credits.
+  afterEach(async () => {
+    expect(await checkLedgerInvariants(pg.db)).toEqual([]);
+  });
 
   beforeEach(async () => {
     await control('POST', '/reset');
@@ -585,6 +591,127 @@ describe('POST /v1/payments (API + Postgres + fake processor)', () => {
 
     it.each(['pay_999999999', 'pay_abc', 'nonsense', 'pay_', 'pay_1; drop table'])('404 for %s', async (id) => {
       expect((await getPaymentHttp(encodeURIComponent(id))).status).toBe(404);
+    });
+  });
+  describe('the ledger (Stage 6)', () => {
+    const ledgerLines = async (orderId: string) => {
+      const attempts = await attemptsFor(orderId);
+      const rows = await pg.db
+        .selectFrom('ledger_transactions as t')
+        .innerJoin('ledger_entries as e', 'e.transaction_id', 't.id')
+        .innerJoin('ledger_accounts as a', 'a.id', 'e.account_id')
+        .select(['a.code', 'e.direction', 'e.amount'])
+        .where('t.posting_key', 'in', attempts.map((a) => `attempt:${a.id}:succeeded`))
+        .orderBy('a.code')
+        .execute();
+      return rows.map((r) => ({ code: r.code, direction: r.direction, amount: Number(r.amount) }));
+    };
+
+    const balance = async (merchant: number | null = merchantId) => {
+      const res = await fetch(`${apiBase}/v1/balance`, {
+        headers: merchant === null ? {} : { 'x-merchant-id': String(merchant) },
+      });
+      return { status: res.status, body: (await res.json()) as any };
+    };
+
+    it('books a successful payment: receivable, merchant payable and platform fee', async () => {
+      const order = newOrder({ amount: 5000 });
+      expect((await pay(order)).status).toBe(201);
+
+      expect(await ledgerLines(order.order_id)).toEqual([
+        { code: `merchant_payable:${merchantId}:NGN`, direction: 'credit', amount: 4925 },
+        { code: 'platform_fee_revenue:NGN', direction: 'credit', amount: 75 },
+        { code: 'processor_receivable:NGN', direction: 'debit', amount: 5000 },
+      ]);
+    });
+
+    it('books once however many times the request is retried', async () => {
+      const order = newOrder();
+      const key = `key-${uid()}`;
+      for (let i = 0; i < 3; i++) await pay(order, { key });
+      expect(await ledgerLines(order.order_id)).toHaveLength(3);
+    });
+
+    it('books once when identical requests race', async () => {
+      const order = newOrder();
+      const key = `key-${uid()}`;
+      await Promise.all(Array.from({ length: 5 }, () => pay(order, { key })));
+      expect(await ledgerLines(order.order_id)).toHaveLength(3);
+    });
+
+    it('books nothing for a declined payment', async () => {
+      const order = newOrder({ source: 'tok_declined' });
+      expect((await pay(order)).status).toBe(402);
+      expect(await ledgerLines(order.order_id)).toEqual([]);
+    });
+
+    it('books nothing for a payment that is still processing', async () => {
+      const order = newOrder({ source: 'tok_pending' });
+      await pay(order);
+      expect(await ledgerLines(order.order_id)).toEqual([]);
+    });
+
+    it('a retry after a lost response does not book a second time', async () => {
+      await rule({ fault: 'drop_after' });
+      const order = newOrder();
+      expect((await pay(order)).status).toBe(201);
+      expect(await processorCharges()).toHaveLength(1);
+      expect(await ledgerLines(order.order_id)).toHaveLength(3);
+    });
+
+    describe('GET /v1/balance', () => {
+      it('is empty before any payment', async () => {
+        expect(await balance()).toEqual({ status: 200, body: { object: 'balance', available: [] } });
+      });
+
+      it('adds up what the merchant is owed, net of fees, per currency', async () => {
+        await pay(newOrder({ amount: 5000 }));
+        await pay(newOrder({ amount: 2000 }));
+        await pay(newOrder({ amount: 1000, currency: 'GHS' }));
+        expect((await balance()).body.available).toEqual([
+          { currency: 'GHS', amount: 985 },
+          { currency: 'NGN', amount: 6895 },
+        ]);
+      });
+
+      it('does not count payments that did not succeed', async () => {
+        await pay(newOrder({ source: 'tok_declined' }));
+        expect((await balance()).body.available).toEqual([]);
+      });
+
+      it("never shows another merchant's money", async () => {
+        const other = await createMerchant(pg.db);
+        await pay(newOrder({ amount: 5000 }), { merchant: other });
+        expect((await balance()).body.available).toEqual([]);
+        expect((await balance(other)).body.available).toEqual([{ currency: 'NGN', amount: 4925 }]);
+      });
+
+      it('refuses an unknown merchant', async () => {
+        expect((await balance(null)).status).toBe(401);
+      });
+    });
+
+    it('rolls the whole settlement back when the books cannot take the posting', async () => {
+      // Sabotage: an account with the payable's code but the wrong kind. Booking will fail.
+      const code = `merchant_payable:${merchantId}:GHS`;
+      await pg.db.insertInto('ledger_accounts').values({ code, kind: 'expense', currency: 'GHS' }).execute();
+
+      const order = newOrder({ currency: 'GHS' });
+      const key = `key-${uid()}`;
+      const reply = await pay(order, { key });
+
+      expect(reply.status).toBe(500);
+      // the customer WAS charged, exactly once, and the payment is not marked paid without books
+      expect(await processorCharges()).toHaveLength(1);
+      const [attempt] = await attemptsFor(order.order_id);
+      expect(attempt.status).toBe('calling_processor');
+      expect(attempt.processor_charge_id).toBeNull();
+      expect(await ledgerLines(order.order_id)).toEqual([]);
+
+      // the claim is kept, so a retry with the same key is held rather than charging again
+      const retry = await pay(order, { key });
+      expect(retry.status).not.toBe(201);
+      expect(await processorCharges()).toHaveLength(1);
     });
   });
 });

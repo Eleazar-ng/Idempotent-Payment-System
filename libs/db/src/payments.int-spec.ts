@@ -282,7 +282,7 @@ describe('payments: beginAttempt and applyProcessorOutcome (real Postgres)', () 
 
     it('succeeded: the attempt succeeds with its charge id, and the database marks the intent succeeded', async () => {
       const { attemptId, intentId } = await fresh();
-      const result = await applyProcessorOutcome(pg.db, attemptId, { kind: 'succeeded', chargeId: 'ch_1' }, 'calling_processor');
+      const result = await applyProcessorOutcome(pg.db, attemptId, { kind: 'succeeded', chargeId: 'ch_1' }, 'calling_processor', { feeBps: 0 });
 
       expect(result).toMatchObject({ outcome: 'applied', attempt: { status: 'succeeded', processor_charge_id: 'ch_1' } });
       expect(await intentStatus(intentId)).toBe('succeeded');
@@ -295,7 +295,7 @@ describe('payments: beginAttempt and applyProcessorOutcome (real Postgres)', () 
       const { attemptId, intentId } = await fresh();
       const chargeId = `ch_${uid()}`;
       const outcome = { kind, chargeId } as ProcessorOutcome;
-      const result = await applyProcessorOutcome(pg.db, attemptId, outcome, 'calling_processor');
+      const result = await applyProcessorOutcome(pg.db, attemptId, outcome, 'calling_processor', { feeBps: 0 });
 
       expect(result).toMatchObject({ outcome: 'applied', attempt: { status, processor_charge_id: chargeId } });
       expect(await intentStatus(intentId)).toBe('open');
@@ -303,7 +303,7 @@ describe('payments: beginAttempt and applyProcessorOutcome (real Postgres)', () 
 
     it('declined: the attempt fails with the processor’s code, the intent stays open for another try', async () => {
       const { attemptId, intentId } = await fresh();
-      const result = await applyProcessorOutcome(pg.db, attemptId, { kind: 'declined', code: 'insufficient_funds', chargeId: 'ch_3' }, 'calling_processor');
+      const result = await applyProcessorOutcome(pg.db, attemptId, { kind: 'declined', code: 'insufficient_funds', chargeId: 'ch_3' }, 'calling_processor', { feeBps: 0 });
 
       expect(result).toMatchObject({
         outcome: 'applied',
@@ -314,20 +314,20 @@ describe('payments: beginAttempt and applyProcessorOutcome (real Postgres)', () 
 
     it('declined without a charge id is fine', async () => {
       const { attemptId } = await fresh();
-      const result = await applyProcessorOutcome(pg.db, attemptId, { kind: 'declined', code: 'card_declined' }, 'calling_processor');
+      const result = await applyProcessorOutcome(pg.db, attemptId, { kind: 'declined', code: 'card_declined' }, 'calling_processor', { feeBps: 0 });
       expect(result).toMatchObject({ outcome: 'applied', attempt: { status: 'failed', processor_charge_id: null } });
     });
 
     it('rejected: fails with a reason that says it was our request that was refused', async () => {
       const { attemptId } = await fresh();
-      const result = await applyProcessorOutcome(pg.db, attemptId, { kind: 'rejected', code: 'parameter_invalid' }, 'calling_processor');
+      const result = await applyProcessorOutcome(pg.db, attemptId, { kind: 'rejected', code: 'parameter_invalid' }, 'calling_processor', { feeBps: 0 });
       expect(result).toMatchObject({ outcome: 'applied', attempt: { status: 'failed', failure_reason: 'processor_rejected:parameter_invalid' } });
     });
 
     it('unknown: changes nothing at all (not knowing is not a reason to fail the attempt)', async () => {
       const { attemptId } = await fresh();
       const before = await getAttempt(pg.db, attemptId);
-      const result = await applyProcessorOutcome(pg.db, attemptId, { kind: 'unknown', reason: 'timeout' }, 'calling_processor');
+      const result = await applyProcessorOutcome(pg.db, attemptId, { kind: 'unknown', reason: 'timeout' }, 'calling_processor', { feeBps: 0 });
 
       expect(result).toEqual({ outcome: 'no_change' });
       expect(await getAttempt(pg.db, attemptId)).toEqual(before);
@@ -336,15 +336,15 @@ describe('payments: beginAttempt and applyProcessorOutcome (real Postgres)', () 
     it('applying the same outcome twice is harmless: the second is already_applied', async () => {
       const { attemptId } = await fresh();
       const outcome: ProcessorOutcome = { kind: 'succeeded', chargeId: 'ch_4' };
-      expect((await applyProcessorOutcome(pg.db, attemptId, outcome, 'calling_processor')).outcome).toBe('applied');
-      expect((await applyProcessorOutcome(pg.db, attemptId, outcome, 'calling_processor')).outcome).toBe('already_applied');
+      expect((await applyProcessorOutcome(pg.db, attemptId, outcome, 'calling_processor', { feeBps: 0 })).outcome).toBe('applied');
+      expect((await applyProcessorOutcome(pg.db, attemptId, outcome, 'calling_processor', { feeBps: 0 })).outcome).toBe('already_applied');
     });
 
     it('a late conflicting outcome is stale and cannot undo the truth', async () => {
       const { attemptId, intentId } = await fresh();
-      await applyProcessorOutcome(pg.db, attemptId, { kind: 'succeeded', chargeId: 'ch_5' }, 'calling_processor');
+      await applyProcessorOutcome(pg.db, attemptId, { kind: 'succeeded', chargeId: 'ch_5' }, 'calling_processor', { feeBps: 0 });
 
-      const late = await applyProcessorOutcome(pg.db, attemptId, { kind: 'declined', code: 'card_declined' }, 'calling_processor');
+      const late = await applyProcessorOutcome(pg.db, attemptId, { kind: 'declined', code: 'card_declined' }, 'calling_processor', { feeBps: 0 });
 
       expect(late.outcome).toBe('stale');
       expect((await getAttempt(pg.db, attemptId))!.status).toBe('succeeded');
@@ -354,7 +354,7 @@ describe('payments: beginAttempt and applyProcessorOutcome (real Postgres)', () 
     it('a webhook-style move to failed that happened first makes a later success stale', async () => {
       const { attemptId } = await fresh();
       await setAttemptStatus(pg.db, attemptId, 'failed');
-      const result = await applyProcessorOutcome(pg.db, attemptId, { kind: 'succeeded', chargeId: 'ch_6' }, 'calling_processor');
+      const result = await applyProcessorOutcome(pg.db, attemptId, { kind: 'succeeded', chargeId: 'ch_6' }, 'calling_processor', { feeBps: 0 });
       expect(result.outcome).toBe('stale');
     });
 
@@ -362,7 +362,7 @@ describe('payments: beginAttempt and applyProcessorOutcome (real Postgres)', () 
       const { attemptId } = await fresh();
       await expect(
         pg.db.transaction().execute(async (trx) => {
-          await applyProcessorOutcome(trx, attemptId, { kind: 'succeeded', chargeId: 'ch_7' }, 'calling_processor');
+          await applyProcessorOutcome(trx, attemptId, { kind: 'succeeded', chargeId: 'ch_7' }, 'calling_processor', { feeBps: 0 });
           throw new Error('later step failed');
         }),
       ).rejects.toThrow('later step failed');

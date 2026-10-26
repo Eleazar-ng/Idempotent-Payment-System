@@ -111,6 +111,15 @@ export interface LedgerEntriesTable {
   currency: string;
 }
 
+/** Read-only view (migration 0004): net debit per account. Liabilities and revenue read negative. */
+export interface LedgerAccountBalancesView {
+  account_id: number;
+  code: string;
+  kind: LedgerAccountKind;
+  currency: string;
+  net_debit: number;
+}
+
 export interface SchemaMigrationsTable {
   name: string;
   checksum: string;
@@ -127,6 +136,7 @@ export interface Database {
   ledger_accounts: LedgerAccountsTable;
   ledger_transactions: LedgerTransactionsTable;
   ledger_entries: LedgerEntriesTable;
+  ledger_account_balances: LedgerAccountBalancesView;
   schema_migrations: SchemaMigrationsTable;
 }
 

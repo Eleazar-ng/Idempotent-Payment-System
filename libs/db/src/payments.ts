@@ -5,6 +5,7 @@ import type { Database, PaymentAttempt, PaymentIntent } from './database.types';
 import { transitionAttempt } from './attempts';
 import type { TransitionResult } from './attempts';
 import { attachAttempt } from './idempotency';
+import { postAttemptSuccess } from './ledger';
 
 export interface BeginAttemptInput {
   merchantId: number;
@@ -185,9 +186,14 @@ export function getAttempt(db: Kysely<Database>, attemptId: number): Promise<Pay
 }
 
 /**
- * Applies what the processor said to the attempt, as one conditional transition (Stage 2). Pass a
- * transaction to commit the status change together with whatever must go with it (the response
- * snapshot now, the ledger posting in Stage 6).
+ * Applies what the processor said to the attempt, as one conditional transition (Stage 2).
+ *
+ * A success is booked in the SAME transaction (Stage 6): the status change and the ledger posting
+ * commit together or not at all, and the database refuses a commit that has one without the other
+ * (migration 0006). If `db` is already a transaction it joins it, so the caller can add its own
+ * writes (the stored API response); otherwise this opens one. Every path that can learn "it
+ * succeeded" (this API call, the webhook handler, reconciliation) goes through here, which is how
+ * they all converge on one set of entries.
  *
  * `unknown` changes nothing, on purpose: not knowing is not a reason to move the attempt anywhere.
  * `abandoned` and recovery (Stage 9) deal with attempts that stay unknown.
@@ -197,10 +203,22 @@ export async function applyProcessorOutcome(
   attemptId: number,
   outcome: ProcessorOutcome,
   from: AttemptStatus | readonly AttemptStatus[],
+  options: { feeBps: number },
 ): Promise<TransitionResult | { outcome: 'no_change' }> {
   switch (outcome.kind) {
     case 'succeeded':
-      return transitionAttempt(db, attemptId, 'succeeded', { from, processorChargeId: outcome.chargeId });
+      return inTransaction(db, async (trx) => {
+        const result = await transitionAttempt(trx, attemptId, 'succeeded', {
+          from,
+          processorChargeId: outcome.chargeId,
+        });
+        // `already_applied`: another path got there first. Booking is idempotent (same posting
+        // key), so this is a no-op if it did its job and a repair if it somehow did not.
+        if (result.outcome === 'applied' || result.outcome === 'already_applied') {
+          await postAttemptSuccess(trx, attemptId, options);
+        }
+        return result;
+      });
     case 'requires_action':
       return transitionAttempt(db, attemptId, 'requires_action', { from, processorChargeId: outcome.chargeId });
     case 'processing':
@@ -216,4 +234,8 @@ export async function applyProcessorOutcome(
     case 'unknown':
       return { outcome: 'no_change' };
   }
+}
+
+function inTransaction<T>(db: Kysely<Database>, work: (trx: Kysely<Database>) => Promise<T>): Promise<T> {
+  return db.isTransaction ? work(db) : db.transaction().execute(work);
 }

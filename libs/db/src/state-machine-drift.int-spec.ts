@@ -1,3 +1,4 @@
+import { postAttemptSuccess } from './ledger';
 import {
   attemptMachine,
   intentMachine,
@@ -102,19 +103,23 @@ describe('state machines: TypeScript versus database', () => {
 
         let refusedByDatabase = false;
         try {
-          await pg.db
-            .updateTable('payment_attempts')
-            .set({
-              status: to,
-              // Only supply what the target needs, and never a second charge id: the write-once
-              // trigger fires before the transition check and would mask what we are testing.
-              ...(to === 'succeeded' && from !== 'succeeded'
-                ? { processor_charge_id: `ch_${attemptId}` }
-                : {}),
-              ...(to === 'failed' ? { failure_reason: 'drift_check' } : {}),
-            })
-            .where('id', '=', attemptId)
-            .execute();
+          await pg.db.transaction().execute(async (trx) => {
+            await trx
+              .updateTable('payment_attempts')
+              .set({
+                status: to,
+                // Only supply what the target needs, and never a second charge id: the write-once
+                // trigger fires before the transition check and would mask what we are testing.
+                ...(to === 'succeeded' && from !== 'succeeded'
+                  ? { processor_charge_id: `ch_${attemptId}` }
+                  : {}),
+                ...(to === 'failed' ? { failure_reason: 'drift_check' } : {}),
+              })
+              .where('id', '=', attemptId)
+              .execute();
+            // A legal move to succeeded only commits together with its ledger posting (0006).
+            if (to === 'succeeded') await postAttemptSuccess(trx, attemptId, { feeBps: 0 });
+          });
         } catch (error) {
           if ((error as { code?: string }).code !== PG.INVALID_TRANSITION) throw error;
           refusedByDatabase = true;
