@@ -11,6 +11,7 @@ export const PG = {
   APPEND_ONLY: 'PY003',
   INTEGRITY: 'PY004',
   UNBALANCED_LEDGER: 'PY005',
+  POSTING_MISMATCH: 'PY006',
 } as const;
 
 function sqlStateOf(error: unknown): string | undefined {

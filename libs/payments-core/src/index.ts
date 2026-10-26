@@ -11,3 +11,4 @@ export * from './webhook-signature';
 export * from './processor-outcome';
 export * from './attempt-keys';
 export * from './payment-status';
+export * from './ledger-posting';

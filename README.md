@@ -14,8 +14,9 @@ controllable fake payment processor.
 | 3 | Claim and replay path: canonical request hashing, atomic claim, replay | **done** |
 | 4 | Fake processor: charges, idempotency window, failure rules, signed webhooks | **done** |
 | 5 | Create-payment API and the outbound processor call | **done** |
-| 6 | Ledger posting, atomic with the success transition | next |
-| 7 to 12 | Webhooks, outbox, retries, recovery, observability, hardening | planned |
+| 6 | Ledger posting, atomic with the success transition | **done** |
+| 7 | Webhook receiver | next |
+| 8 to 12 | Outbox, retries, recovery, observability, hardening | planned |
 
 ## Layout
 
@@ -262,7 +263,6 @@ and the unresolved attempt itself blocks any new payment for the order (409) unt
 ### Known gaps, by design
 
 - A `pending` or `requires_action` attempt stays that way until the webhook handler (Stage 7).
-- Success does not post to the ledger yet; `settle()` in `payments.service.ts` is the transaction Stage 6 extends.
 - If the process dies after an attempt exists but before the response is stored, the key stays in flight until the
   recovery sweeper (Stage 9). Before an attempt exists the claim is released instead.
 - Retry pauses are a plain doubling with no jitter; Stage 8 replaces them with a real policy.
@@ -275,6 +275,43 @@ and the unresolved attempt itself blocks any new payment for the order (409) unt
    transient 409 would tell a client "in progress" forever.
 3. `rejected` (the processor refused our request) is separate from `declined` (the card was refused), because only one
    of them is the customer's problem.
+
+## Ledger posting (Stage 6)
+
+A succeeded payment is booked in the same transaction that marks the attempt `succeeded`. `applyProcessorOutcome`
+is the single place that does both, so the API now, the webhook handler (Stage 7) and reconciliation (Stage 9)
+all book the same way.
+
+| Line | Account (kind) | Amount for a 5000 payment at 150 bps |
+|---|---|---|
+| debit | `processor_receivable:CCY` (asset) | 5000 |
+| credit | `merchant_payable:<merchant>:CCY` (liability) | 4925 |
+| credit | `platform_fee_revenue:CCY` (revenue) | 75 |
+
+The fee is `amount * PLATFORM_FEE_BPS / 10000`, rounded half up in integer arithmetic (default 150). A zero fee
+leaves out its line. Accounts are created on first use. The posting key is `attempt:<id>:succeeded`, so booking the
+same success twice writes nothing the second time.
+
+**The rule the database enforces (migration 0006, SQLSTATE `PY006`):** an attempt is `succeeded` if and only if
+its posting exists and its debits equal the payment amount, in the payment currency. Both sides are deferred
+constraint triggers, checked at COMMIT: a success without a posting is refused, and a posting for an attempt
+that has not succeeded is refused. The only way to satisfy them is one transaction, in either order.
+
+`checkLedgerInvariants(db)` asks the same questions after the fact (plus "debits equal credits" and "one success
+per order") and returns the violations. Every API test runs it afterwards. `GET /v1/balance` reports what the
+platform owes the merchant, read from the ledger and never from a stored counter.
+
+If booking fails (say an account exists with the wrong kind), the whole settlement rolls back: the attempt stays
+`calling_processor`, the customer has been charged exactly once, and the unresolved attempt is left for recovery
+(Stage 9). That is deliberate: "paid but not booked" must not exist.
+
+### Deliberate differences from the lectures
+
+1. The success-and-posting pairing is enforced by the database, not just by application code.
+2. `already_applied` still calls the (idempotent) posting, so a success that was somehow left unbooked is repaired
+   when the same outcome arrives again.
+3. Not covered by a test: creating accounts in sorted order to avoid deadlocks. It is in the code, but a deterministic
+   test for it was not worth the complexity here.
 
 ## Why these versions
 

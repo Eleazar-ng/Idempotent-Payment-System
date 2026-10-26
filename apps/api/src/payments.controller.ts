@@ -32,3 +32,16 @@ export class PaymentsController {
     return send(res, await this.payments.getPayment(merchantId, id));
   }
 }
+
+@Controller('v1/balance')
+export class BalanceController {
+  constructor(private readonly payments: PaymentsService) {}
+
+  @Get()
+  async retrieve(
+    @Headers('x-merchant-id') merchantId: string | undefined,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<unknown> {
+    return send(res, await this.payments.getBalance(merchantId));
+  }
+}

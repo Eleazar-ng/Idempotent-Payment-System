@@ -1,4 +1,4 @@
-import { attemptMachine } from '../../payments-core/src';
+import { attemptMachine, type AttemptStatus } from '../../payments-core/src';
 import {
   createAttempt,
   createAttemptInStatus,
@@ -9,7 +9,26 @@ import {
   startMigratedPostgres,
   TestPostgres,
 } from '../../testing/src';
+import type { Kysely } from 'kysely';
 import { transitionAttempt } from './attempts';
+import type { TransitionOptions } from './attempts';
+import type { Database } from './database.types';
+import { postAttemptSuccess } from './ledger';
+
+/**
+ * transitionAttempt, except that a move to `succeeded` is booked in the same transaction, because
+ * the database refuses a success without its ledger posting (migration 0006). Everything else is
+ * the plain helper, so these tests still exercise exactly its behaviour.
+ */
+async function transition(db: Kysely<Database>, id: number, to: AttemptStatus, options: TransitionOptions) {
+  if (to !== 'succeeded') return transitionAttempt(db, id, to, options);
+  const run = async (conn: Kysely<Database>) => {
+    const result = await transitionAttempt(conn, id, to, options);
+    if (result.outcome === 'applied') await postAttemptSuccess(conn, id, { feeBps: 0 });
+    return result;
+  };
+  return db.isTransaction ? run(db) : db.transaction().execute(run);
+}
 
 /**
  * Stage 2.3: the conditional-update helper, against a real Postgres.
@@ -45,7 +64,7 @@ describe('transitionAttempt (real Postgres)', () => {
       const { attemptId } = await createAttemptInStatus(pg.db, 'created');
       const before = await fetchAttempt(attemptId);
 
-      const result = await transitionAttempt(pg.db, attemptId, 'calling_processor', { from: 'created' });
+      const result = await transition(pg.db, attemptId, 'calling_processor', { from: 'created' });
 
       expect(result.outcome).toBe('applied');
       if (result.outcome !== 'applied') throw new Error('unreachable');
@@ -58,7 +77,7 @@ describe('transitionAttempt (real Postgres)', () => {
     it('records the processor charge id on success, and the intent becomes succeeded with it', async () => {
       const { attemptId, intentId } = await createAttemptInStatus(pg.db, 'calling_processor');
 
-      const result = await transitionAttempt(pg.db, attemptId, 'succeeded', {
+      const result = await transition(pg.db, attemptId, 'succeeded', {
         from: 'calling_processor',
         processorChargeId: 'ch_applied_1',
       });
@@ -71,7 +90,7 @@ describe('transitionAttempt (real Postgres)', () => {
     it('records the failure reason on failure, and leaves the intent open for a retry', async () => {
       const { attemptId, intentId } = await createAttemptInStatus(pg.db, 'processing');
 
-      const result = await transitionAttempt(pg.db, attemptId, 'failed', {
+      const result = await transition(pg.db, attemptId, 'failed', {
         from: 'processing',
         failureReason: 'insufficient_funds',
       });
@@ -84,11 +103,11 @@ describe('transitionAttempt (real Postgres)', () => {
     it('can record a charge id on an intermediate move, then confirm the same id on success', async () => {
       const { attemptId } = await createAttemptInStatus(pg.db, 'calling_processor');
 
-      await transitionAttempt(pg.db, attemptId, 'processing', {
+      await transition(pg.db, attemptId, 'processing', {
         from: 'calling_processor',
         processorChargeId: 'ch_early',
       });
-      const result = await transitionAttempt(pg.db, attemptId, 'succeeded', {
+      const result = await transition(pg.db, attemptId, 'succeeded', {
         from: 'processing',
         processorChargeId: 'ch_early',
       });
@@ -101,7 +120,7 @@ describe('transitionAttempt (real Postgres)', () => {
       for (const status of attemptMachine.legalPredecessors('succeeded')) {
         const { attemptId } = await createAttemptInStatus(pg.db, status);
 
-        const result = await transitionAttempt(pg.db, attemptId, 'succeeded', {
+        const result = await transition(pg.db, attemptId, 'succeeded', {
           from: attemptMachine.legalPredecessors('succeeded'),
           processorChargeId: `ch_any_${status}_${attemptId}`,
         });
@@ -116,9 +135,9 @@ describe('transitionAttempt (real Postgres)', () => {
       const { attemptId } = await createAttemptInStatus(pg.db, 'calling_processor');
       const options = { from: 'calling_processor', processorChargeId: 'ch_dup' } as const;
 
-      const first = await transitionAttempt(pg.db, attemptId, 'succeeded', options);
+      const first = await transition(pg.db, attemptId, 'succeeded', options);
       const afterFirst = await fetchAttempt(attemptId);
-      const second = await transitionAttempt(pg.db, attemptId, 'succeeded', options);
+      const second = await transition(pg.db, attemptId, 'succeeded', options);
       const afterSecond = await fetchAttempt(attemptId);
 
       expect(first.outcome).toBe('applied');
@@ -134,7 +153,7 @@ describe('transitionAttempt (real Postgres)', () => {
       const before = await fetchAttempt(attemptId);
 
       // The timeout job read "calling_processor" a moment ago and now tries to mark it failed.
-      const result = await transitionAttempt(pg.db, attemptId, 'failed', {
+      const result = await transition(pg.db, attemptId, 'failed', {
         from: 'calling_processor',
         failureReason: 'timeout',
       });
@@ -148,7 +167,7 @@ describe('transitionAttempt (real Postgres)', () => {
     it('reports the real current status so the caller can decide what to do', async () => {
       const { attemptId } = await createAttemptInStatus(pg.db, 'requires_action');
 
-      const result = await transitionAttempt(pg.db, attemptId, 'succeeded', {
+      const result = await transition(pg.db, attemptId, 'succeeded', {
         from: 'calling_processor',
         processorChargeId: 'ch_stale',
       });
@@ -160,7 +179,7 @@ describe('transitionAttempt (real Postgres)', () => {
       // processing -> succeeded is legal, but the caller only expected calling_processor.
       const { attemptId } = await createAttemptInStatus(pg.db, 'processing');
 
-      const result = await transitionAttempt(pg.db, attemptId, 'succeeded', {
+      const result = await transition(pg.db, attemptId, 'succeeded', {
         from: 'calling_processor',
         processorChargeId: 'ch_unnamed',
       });
@@ -172,7 +191,7 @@ describe('transitionAttempt (real Postgres)', () => {
 
   describe('not_found', () => {
     it('reports a missing attempt instead of throwing', async () => {
-      const result = await transitionAttempt(pg.db, 2_000_000_000, 'calling_processor', { from: 'created' });
+      const result = await transition(pg.db, 2_000_000_000, 'calling_processor', { from: 'created' });
       expect(result).toEqual({ outcome: 'not_found' });
     });
   });
@@ -183,7 +202,7 @@ describe('transitionAttempt (real Postgres)', () => {
 
       const results = await Promise.all(
         Array.from({ length: 25 }, () =>
-          transitionAttempt(pg.db, attemptId, 'succeeded', {
+          transition(pg.db, attemptId, 'succeeded', {
             from: 'calling_processor',
             processorChargeId: 'ch_race_same',
           }),
@@ -204,11 +223,11 @@ describe('transitionAttempt (real Postgres)', () => {
       const results = await Promise.all(
         Array.from({ length: 30 }, (_, i) =>
           i % 2 === 0
-            ? transitionAttempt(pg.db, attemptId, 'succeeded', {
+            ? transition(pg.db, attemptId, 'succeeded', {
                 from: 'calling_processor',
                 processorChargeId: 'ch_race_conflict',
               }).then((result) => ({ target: 'succeeded', result }))
-            : transitionAttempt(pg.db, attemptId, 'failed', {
+            : transition(pg.db, attemptId, 'failed', {
                 from: 'calling_processor',
                 failureReason: 'timeout',
               }).then((result) => ({ target: 'failed', result })),
@@ -238,12 +257,12 @@ describe('transitionAttempt (real Postgres)', () => {
 
       const results = await Promise.all(
         ids.flatMap((attemptId) => [
-          transitionAttempt(pg.db, attemptId, 'succeeded', {
+          transition(pg.db, attemptId, 'succeeded', {
             from: 'calling_processor',
             processorChargeId: `ch_many_${attemptId}`,
           }),
-          transitionAttempt(pg.db, attemptId, 'failed', { from: 'calling_processor', failureReason: 'timeout' }),
-          transitionAttempt(pg.db, attemptId, 'abandoned', { from: 'calling_processor' }),
+          transition(pg.db, attemptId, 'failed', { from: 'calling_processor', failureReason: 'timeout' }),
+          transition(pg.db, attemptId, 'abandoned', { from: 'calling_processor' }),
         ]),
       );
 
@@ -255,14 +274,14 @@ describe('transitionAttempt (real Postgres)', () => {
   describe('database protections still apply underneath', () => {
     it('refuses to change a charge id once it is set, and leaves the attempt untouched', async () => {
       const { attemptId } = await createAttemptInStatus(pg.db, 'calling_processor');
-      await transitionAttempt(pg.db, attemptId, 'processing', {
+      await transition(pg.db, attemptId, 'processing', {
         from: 'calling_processor',
         processorChargeId: 'ch_first',
       });
       const before = await fetchAttempt(attemptId);
 
       await expectSqlState(
-        transitionAttempt(pg.db, attemptId, 'succeeded', {
+        transition(pg.db, attemptId, 'succeeded', {
           from: 'processing',
           processorChargeId: 'ch_different',
         }),
@@ -276,13 +295,13 @@ describe('transitionAttempt (real Postgres)', () => {
     it('refuses a success whose charge id is already attached to another attempt', async () => {
       const first = await createAttemptInStatus(pg.db, 'calling_processor');
       const second = await createAttemptInStatus(pg.db, 'calling_processor');
-      await transitionAttempt(pg.db, first.attemptId, 'succeeded', {
+      await transition(pg.db, first.attemptId, 'succeeded', {
         from: 'calling_processor',
         processorChargeId: 'ch_shared',
       });
 
       await expectSqlState(
-        transitionAttempt(pg.db, second.attemptId, 'succeeded', {
+        transition(pg.db, second.attemptId, 'succeeded', {
           from: 'calling_processor',
           processorChargeId: 'ch_shared',
         }),
@@ -295,7 +314,7 @@ describe('transitionAttempt (real Postgres)', () => {
       const { attemptId } = await createAttemptInStatus(pg.db, 'calling_processor');
 
       await expectSqlState(
-        transitionAttempt(pg.db, attemptId, 'succeeded', { from: 'calling_processor' }),
+        transition(pg.db, attemptId, 'succeeded', { from: 'calling_processor' }),
         PG.CHECK_VIOLATION,
         /succeeded_has_charge/,
       );
@@ -308,7 +327,7 @@ describe('transitionAttempt (real Postgres)', () => {
 
       await expect(
         pg.db.transaction().execute(async (trx) => {
-          const result = await transitionAttempt(trx, attemptId, 'succeeded', {
+          const result = await transition(trx, attemptId, 'succeeded', {
             from: 'calling_processor',
             processorChargeId: 'ch_rolled_back',
           });
@@ -326,7 +345,7 @@ describe('transitionAttempt (real Postgres)', () => {
       const { attemptId, intentId } = await createAttemptInStatus(pg.db, 'calling_processor');
 
       await pg.db.transaction().execute(async (trx) => {
-        await transitionAttempt(trx, attemptId, 'succeeded', {
+        await transition(trx, attemptId, 'succeeded', {
           from: 'calling_processor',
           processorChargeId: 'ch_committed',
         });
@@ -342,18 +361,18 @@ describe('transitionAttempt (real Postgres)', () => {
     const intentId = await createIntent(pg.db, merchantId);
     const attemptId = await createAttempt(pg.db, intentId);
 
-    expect((await transitionAttempt(pg.db, attemptId, 'calling_processor', { from: 'created' })).outcome).toBe(
+    expect((await transition(pg.db, attemptId, 'calling_processor', { from: 'created' })).outcome).toBe(
       'applied',
     );
     expect(
-      (await transitionAttempt(pg.db, attemptId, 'requires_action', { from: 'calling_processor' })).outcome,
+      (await transition(pg.db, attemptId, 'requires_action', { from: 'calling_processor' })).outcome,
     ).toBe('applied');
-    expect((await transitionAttempt(pg.db, attemptId, 'processing', { from: 'requires_action' })).outcome).toBe(
+    expect((await transition(pg.db, attemptId, 'processing', { from: 'requires_action' })).outcome).toBe(
       'applied',
     );
     expect(
       (
-        await transitionAttempt(pg.db, attemptId, 'succeeded', {
+        await transition(pg.db, attemptId, 'succeeded', {
           from: 'processing',
           processorChargeId: 'ch_journey',
         })

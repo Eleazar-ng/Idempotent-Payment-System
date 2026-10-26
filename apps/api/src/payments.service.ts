@@ -7,6 +7,7 @@ import {
   claimKey,
   completeKey,
   DB,
+  getMerchantBalances,
   getPayment,
   releaseClaim,
   transitionAttempt,
@@ -28,6 +29,8 @@ export interface PaymentFlowOptions {
   /** Extra tries after an unknown outcome, all with the same processor idempotency key. */
   callRetries: number;
   retryDelayMs: number;
+  /** The platform's fee in basis points, booked on every successful payment. */
+  feeBps: number;
 }
 
 const OPERATION = 'POST /v1/payments';
@@ -114,6 +117,19 @@ export class PaymentsService {
     const record = match ? await getPayment(this.db, merchantId, Number(match[1])) : undefined;
     if (!record) return problem(404, 'payment_not_found', 'No such payment.');
     return { status: 200, body: paymentView(record.intent, record.latestAttempt), headers: {} };
+  }
+
+  /** What the platform owes this merchant, straight from the ledger (never a stored counter). */
+  async getBalance(merchantIdHeader: unknown): Promise<HttpResult> {
+    const merchantId = await this.authenticate(merchantIdHeader);
+    if (typeof merchantId !== 'number') return merchantId;
+
+    const balances = await getMerchantBalances(this.db, merchantId);
+    return {
+      status: 200,
+      body: { object: 'balance', available: balances.map((b) => ({ currency: b.currency, amount: b.payable })) },
+      headers: {},
+    };
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -254,7 +270,7 @@ export class PaymentsService {
     outcome: ProcessorOutcome,
   ): Promise<HttpResult> {
     return this.db.transaction().execute(async (trx) => {
-      await applyProcessorOutcome(trx, attempt.id, outcome, 'calling_processor');
+      await applyProcessorOutcome(trx, attempt.id, outcome, 'calling_processor', { feeBps: this.options.feeBps });
 
       const record = await getPayment(trx, merchantId, intent.id);
       const result = paymentResult(record?.intent ?? intent, record?.latestAttempt ?? attempt);

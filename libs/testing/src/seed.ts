@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { Kysely, sql } from 'kysely';
+import { postAttemptSuccess } from '../../db/src';
 import type { Database, PaymentAttemptStatus } from '../../db/src';
 
 /** Short random suffix so tests never collide on unique business keys. */
@@ -49,21 +50,31 @@ export async function createAttempt(
   return row.id;
 }
 
-/** Moves an attempt to `status`, supplying the charge id or failure reason those states require. */
+/**
+ * Moves an attempt to `status`, supplying the charge id or failure reason those states require.
+ *
+ * Moving to `succeeded` also books the ledger posting in the same transaction, because the
+ * database refuses a success without one (migration 0006). Tests that need a bare, unbooked
+ * success must use raw SQL inside their own transaction and say so.
+ */
 export async function setAttemptStatus(
   db: Kysely<Database>,
   attemptId: number,
   status: PaymentAttemptStatus,
-) {
-  return db
-    .updateTable('payment_attempts')
-    .set({
-      status,
-      ...(status === 'succeeded' ? { processor_charge_id: `ch_${uid()}` } : {}),
-      ...(status === 'failed' ? { failure_reason: 'card_declined' } : {}),
-    })
-    .where('id', '=', attemptId)
-    .execute();
+): Promise<void> {
+  const move = async (conn: Kysely<Database>) => {
+    await conn
+      .updateTable('payment_attempts')
+      .set({
+        status,
+        ...(status === 'succeeded' ? { processor_charge_id: `ch_${uid()}` } : {}),
+        ...(status === 'failed' ? { failure_reason: 'card_declined' } : {}),
+      })
+      .where('id', '=', attemptId)
+      .execute();
+    if (status === 'succeeded') await postAttemptSuccess(conn, attemptId, { feeBps: 0 });
+  };
+  await (db.isTransaction ? move(db) : db.transaction().execute(move));
 }
 
 /** The shortest legal path from 'created' to each status. */
@@ -146,7 +157,8 @@ export async function postLedgerTransaction(
       .insertInto('ledger_transactions')
       .values({
         posting_key: postingKey,
-        source_type: 'payment_attempt',
+        // Not an attempt success: those are checked against a real, succeeded attempt (0006).
+        source_type: 'refund',
         source_id: options.sourceId ?? 1,
         entry_count: options.entryCount ?? entries.length,
       })

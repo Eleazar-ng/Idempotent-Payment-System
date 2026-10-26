@@ -15,6 +15,11 @@ describe('loadEnv', () => {
     expect(env.PROCESSOR_TIMEOUT_MS).toBe(5000);
     expect(env.PROCESSOR_CALL_RETRIES).toBe(2);
     expect(env.PROCESSOR_RETRY_DELAY_MS).toBe(200);
+    expect(env.PLATFORM_FEE_BPS).toBe(150);
+  });
+
+  it.each(['-1', '10001', '1.5'])('refuses a fee of %s basis points', (bps) => {
+    expect(() => loadEnv({ ...valid, PLATFORM_FEE_BPS: bps })).toThrow(/PLATFORM_FEE_BPS/);
   });
 
   it('refuses an unreasonable number of call retries', () => {
