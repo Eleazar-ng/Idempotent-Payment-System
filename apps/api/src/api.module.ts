@@ -7,6 +7,9 @@ import { HealthController } from './health.controller';
 import { BalanceController, PaymentsController } from './payments.controller';
 import { PAYMENT_FLOW_OPTIONS, PaymentsService } from './payments.service';
 import type { PaymentFlowOptions } from './payments.service';
+import { WebhooksController } from './webhooks.controller';
+import { WEBHOOK_OPTIONS, WebhooksService } from './webhooks.service';
+import type { WebhookOptions } from './webhooks.service';
 import { PROCESSOR_CLIENT_OPTIONS, ProcessorClient } from './processor.client';
 import type { ProcessorClientOptions } from './processor.client';
 import { ApiController } from './api.controller';
@@ -14,7 +17,7 @@ import { ApiService } from './api.service';
 
 @Module({
   imports: [AppConfigModule, DbModule],
-  controllers: [ApiController, HealthController, PaymentsController, BalanceController],
+  controllers: [ApiController, HealthController, PaymentsController, BalanceController, WebhooksController],
   providers: [
     ApiService,
     {
@@ -34,7 +37,16 @@ import { ApiService } from './api.service';
         feeBps: config.get('PLATFORM_FEE_BPS', { infer: true }),
       }),
     },
+    {
+      provide: WEBHOOK_OPTIONS,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService<Env, true>): WebhookOptions => ({
+        secret: config.get('PROCESSOR_WEBHOOK_SECRET', { infer: true }),
+        feeBps: config.get('PLATFORM_FEE_BPS', { infer: true }),
+      }),
+    },
     ProcessorClient,
+    WebhooksService,
     PaymentsService,
   ],
 })

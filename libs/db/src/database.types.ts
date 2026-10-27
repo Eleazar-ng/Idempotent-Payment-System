@@ -120,6 +120,28 @@ export interface LedgerAccountBalancesView {
   net_debit: number;
 }
 
+export type WebhookEventResult =
+  | 'received'
+  | 'applied'
+  | 'already_applied'
+  | 'ignored'
+  | 'unmatched'
+  | 'mismatch'
+  | 'conflict';
+
+export interface WebhookEventsTable {
+  id: Generated<number>;
+  source: string;
+  event_id: string;
+  event_type: string;
+  payload: ColumnType<Json, string, string>;
+  attempt_id: Nullable<number>;
+  result: Generated<WebhookEventResult>;
+  detail: Nullable<string>;
+  received_at: Generated<Date>;
+  processed_at: Nullable<Date>;
+}
+
 export interface SchemaMigrationsTable {
   name: string;
   checksum: string;
@@ -137,6 +159,7 @@ export interface Database {
   ledger_transactions: LedgerTransactionsTable;
   ledger_entries: LedgerEntriesTable;
   ledger_account_balances: LedgerAccountBalancesView;
+  webhook_events: WebhookEventsTable;
   schema_migrations: SchemaMigrationsTable;
 }
 
@@ -148,3 +171,4 @@ export type NewPaymentAttempt = Insertable<PaymentAttemptsTable>;
 export type PaymentAttemptUpdate = Updateable<PaymentAttemptsTable>;
 export type IdempotencyKey = Selectable<IdempotencyKeysTable>;
 export type NewIdempotencyKey = Insertable<IdempotencyKeysTable>;
+export type WebhookEvent = Selectable<WebhookEventsTable>;
