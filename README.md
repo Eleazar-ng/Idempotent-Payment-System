@@ -15,8 +15,9 @@ controllable fake payment processor.
 | 4 | Fake processor: charges, idempotency window, failure rules, signed webhooks | **done** |
 | 5 | Create-payment API and the outbound processor call | **done** |
 | 6 | Ledger posting, atomic with the success transition | **done** |
-| 7 | Webhook receiver | next |
-| 8 to 12 | Outbox, retries, recovery, observability, hardening | planned |
+| 7 | Webhook receiver | **done** |
+| 8 | Outbox and a real retry policy (with jitter) | next |
+| 9 to 12 | Recovery and reconciliation, observability, hardening, final | planned |
 
 ## Layout
 
@@ -262,7 +263,7 @@ and the unresolved attempt itself blocks any new payment for the order (409) unt
 
 ### Known gaps, by design
 
-- A `pending` or `requires_action` attempt stays that way until the webhook handler (Stage 7).
+- A `pending` or `requires_action` attempt is completed by the webhook (Stage 7). If the webhook never comes, nothing completes it until recovery (Stage 9).
 - If the process dies after an attempt exists but before the response is stored, the key stays in flight until the
   recovery sweeper (Stage 9). Before an attempt exists the claim is released instead.
 - Retry pauses are a plain doubling with no jitter; Stage 8 replaces them with a real policy.
@@ -312,6 +313,62 @@ If booking fails (say an account exists with the wrong kind), the whole settleme
    when the same outcome arrives again.
 3. Not covered by a test: creating accounts in sorted order to avoid deadlocks. It is in the code, but a deterministic
    test for it was not worth the complexity here.
+
+## Webhook receiver (Stage 7)
+
+`POST /webhooks/processor` is how the processor tells us a payment finished after our request returned (`pending` to
+`succeeded`, `requires_action` to `failed`, ...). The processor sends each event **at least once**: duplicates, late
+copies and out-of-order delivery are normal, and the receiver is built for them.
+
+```
+raw bytes + Processor-Signature ─► verify (HMAC over "<t>.<body>", 5 min tolerance) ─► 400 if not
+                                  ─► parse the event                                    ─► 400 if unusable
+                                  ─► ONE transaction:  claim event id ─► find attempt ─► applyProcessorOutcome ─► record verdict
+                                  ─► 200 (always, once the event is recorded)
+```
+
+| Rule | How |
+|---|---|
+| Only the processor can say a payment succeeded | HMAC over the **raw** request bytes (`rawBody`), constant-time compare, timestamp inside the signed data; re-spaced JSON fails on purpose |
+| Same event twice is handled once | `webhook_events` has `UNIQUE (source, event_id)` (migration 0007); the claim is the first statement of the transaction, so a concurrent copy waits and then sees it finished |
+| A recorded event is a fully handled event | claim, status change and ledger posting commit together. If handling fails the claim rolls back, the answer is 5xx, and the processor redelivers into a clean slate |
+| Success books the ledger | same `applyProcessorOutcome` as the API, so migration 0006 holds on this path too |
+| A late or duplicate event is not an error | `already_applied`, acknowledged with 200 |
+| `requires_action` can finish as `succeeded` | the handler steps through `processing` first, the only legal route |
+| The processor and we disagree | recorded, **not applied**, acknowledged (resending cannot change the answer) |
+
+How an attempt is found: by the charge id once we hold it, otherwise by the `reference` we put in the charge request (the
+attempt's processor idempotency key). The second route is what lets a webhook complete a payment whose API response never
+arrived.
+
+What each verdict in `webhook_events.result` means:
+
+| Result | Meaning | Needs attention? |
+|---|---|---|
+| `applied` | moved the attempt to the state the event describes | no |
+| `already_applied` | the attempt was already there (API answer or an earlier event) | no |
+| `ignored` | an event type we do not act on | no |
+| `unmatched` | a charge no attempt of ours explains | yes |
+| `mismatch` | amount or currency differ from the payment | yes |
+| `conflict` | contradicts a final state (success for a failed attempt and the reverse), or a different charge id | yes |
+
+`listWebhookEventsNeedingAttention(db)` returns the last three kinds; they are the work queue for reconciliation (Stage 9).
+Rows are immutable once handled (triggers, `PY002` and `PY003`); `DELETE` stays possible for retention.
+
+### Known gaps, by design
+
+- If the processor never sends the webhook (or gives up retrying), the attempt stays `processing` until Stage 9 asks the processor directly.
+- Conflicts and mismatches are logged and stored; nothing yet alerts or resolves them (Stages 9 and 10).
+- One shared secret, no rotation window wired in (`verifyWebhook` already accepts several; configuration comes in Stage 11).
+- Handling runs inside the HTTP request. Moving it to a queue and acknowledging first is Stage 8's outbox topic.
+
+### Deliberate differences from the lectures
+
+1. The dedup record is written in the same transaction as the effect, not before it. Marking an event "seen" first and
+   then failing would make the processor's redelivery a no-op and lose the payment.
+2. Disagreements are acknowledged with 200 and stored, not rejected with 4xx, because a 4xx just makes the processor retry
+   forever against an answer that cannot change.
+3. Looking an attempt up by `reference` as well as by charge id (the lectures matched on charge id only).
 
 ## Why these versions
 
