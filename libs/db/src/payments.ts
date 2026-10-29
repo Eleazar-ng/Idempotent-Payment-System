@@ -1,11 +1,12 @@
 import type { Kysely } from 'kysely';
-import { processorIdempotencyKey } from '../../payments-core/src';
-import type { AttemptStatus, ProcessorOutcome } from '../../payments-core/src';
+import { processorIdempotencyKey } from '@app/payments-core';
+import type { AttemptStatus, ProcessorOutcome } from '@app/payments-core';
 import type { Database, PaymentAttempt, PaymentIntent } from './database.types';
 import { transitionAttempt } from './attempts';
-import type { TransitionResult } from './attempts';
+import type { TransitionOptions, TransitionResult } from './attempts';
 import { attachAttempt } from './idempotency';
 import { postAttemptSuccess } from './ledger';
+import { enqueuePaymentEvent } from './outbox';
 
 export interface BeginAttemptInput {
   merchantId: number;
@@ -212,10 +213,11 @@ export async function applyProcessorOutcome(
           from,
           processorChargeId: outcome.chargeId,
         });
-        // `already_applied`: another path got there first. Booking is idempotent (same posting
-        // key), so this is a no-op if it did its job and a repair if it somehow did not.
+        // `already_applied`: another path got there first. Booking and notifying are idempotent (same
+        // posting key, same dedupe key), so this is a no-op if it did its job and a repair if it did not.
         if (result.outcome === 'applied' || result.outcome === 'already_applied') {
           await postAttemptSuccess(trx, attemptId, options);
+          await enqueuePaymentEvent(trx, attemptId);
         }
         return result;
       });
@@ -224,16 +226,27 @@ export async function applyProcessorOutcome(
     case 'processing':
       return transitionAttempt(db, attemptId, 'processing', { from, processorChargeId: outcome.chargeId });
     case 'declined':
-      return transitionAttempt(db, attemptId, 'failed', {
+      return failAndNotify(db, attemptId, {
         from,
         failureReason: outcome.code,
         ...(outcome.chargeId ? { processorChargeId: outcome.chargeId } : {}),
       });
     case 'rejected':
-      return transitionAttempt(db, attemptId, 'failed', { from, failureReason: `processor_rejected:${outcome.code}` });
+      return failAndNotify(db, attemptId, { from, failureReason: `processor_rejected:${outcome.code}` });
     case 'unknown':
       return { outcome: 'no_change' };
   }
+}
+
+/** Moves an attempt to failed and tells the merchant, atomically. */
+function failAndNotify(db: Kysely<Database>, attemptId: number, options: TransitionOptions): Promise<TransitionResult> {
+  return inTransaction(db, async (trx) => {
+    const result = await transitionAttempt(trx, attemptId, 'failed', options);
+    if (result.outcome === 'applied' || result.outcome === 'already_applied') {
+      await enqueuePaymentEvent(trx, attemptId);
+    }
+    return result;
+  });
 }
 
 function inTransaction<T>(db: Kysely<Database>, work: (trx: Kysely<Database>) => Promise<T>): Promise<T> {

@@ -16,8 +16,9 @@ controllable fake payment processor.
 | 5 | Create-payment API and the outbound processor call | **done** |
 | 6 | Ledger posting, atomic with the success transition | **done** |
 | 7 | Webhook receiver | **done** |
-| 8 | Outbox and a real retry policy (with jitter) | next |
-| 9 to 12 | Recovery and reconciliation, observability, hardening, final | planned |
+| 8 | Outbox and a real retry policy (with jitter) | **done** |
+| 9 | Recovery and reconciliation (stuck attempts, missing webhooks) | next |
+| 10 to 12 | Observability, hardening, final | planned |
 
 ## Layout
 
@@ -266,7 +267,7 @@ and the unresolved attempt itself blocks any new payment for the order (409) unt
 - A `pending` or `requires_action` attempt is completed by the webhook (Stage 7). If the webhook never comes, nothing completes it until recovery (Stage 9).
 - If the process dies after an attempt exists but before the response is stored, the key stays in flight until the
   recovery sweeper (Stage 9). Before an attempt exists the claim is released instead.
-- Retry pauses are a plain doubling with no jitter; Stage 8 replaces them with a real policy.
+- Retries between processor calls use the jittered backoff policy from Stage 8 (`PROCESSOR_RETRY_DELAY_MS` up to `PROCESSOR_RETRY_MAX_DELAY_MS`).
 
 ### Deliberate differences from the lectures
 
@@ -360,7 +361,7 @@ Rows are immutable once handled (triggers, `PY002` and `PY003`); `DELETE` stays 
 - If the processor never sends the webhook (or gives up retrying), the attempt stays `processing` until Stage 9 asks the processor directly.
 - Conflicts and mismatches are logged and stored; nothing yet alerts or resolves them (Stages 9 and 10).
 - One shared secret, no rotation window wired in (`verifyWebhook` already accepts several; configuration comes in Stage 11).
-- Handling runs inside the HTTP request. Moving it to a queue and acknowledging first is Stage 8's outbox topic.
+- Handling runs inside the HTTP request, on purpose: the work is one database transaction, and putting a queue in front of it would add a second place an event can be lost. (The outbox in Stage 8 is for what we send, not for what we receive.)
 
 ### Deliberate differences from the lectures
 
@@ -369,6 +370,70 @@ Rows are immutable once handled (triggers, `PY002` and `PY003`); `DELETE` stays 
 2. Disagreements are acknowledged with 200 and stored, not rejected with 4xx, because a 4xx just makes the processor retry
    forever against an answer that cannot change.
 3. Looking an attempt up by `reference` as well as by charge id (the lectures matched on charge id only).
+
+## Outbox and retries (Stage 8)
+
+Two separate things arrive in this stage.
+
+### Retry policy
+
+`retryDelayMs(policy, retryNumber)` in `libs/payments-core` is the one place that decides how long to wait before
+trying again: exponential growth from a base, capped at a maximum, then **jitter**. Plain doubling makes every client
+that failed together retry together; full jitter (the default) picks uniformly between 0 and the ceiling, which
+spreads the load while the other side recovers. A `Retry-After` from the other side is honoured as a floor, but never
+beyond the policy maximum. The random source is a parameter, so tests pin it. The processor calls (Stage 5) and the
+merchant deliveries below both use it.
+
+### Transactional outbox
+
+Telling a merchant "your payment succeeded" has to happen if and only if the payment really did succeed. An HTTP
+call inside the transaction cannot promise that (the call can succeed and the commit fail, or the reverse). So the
+transaction only **writes a row**, and a separate relay delivers it afterwards.
+
+```
+applyProcessorOutcome  ──one transaction──►  attempt status  +  ledger posting  +  outbox_events row
+                                                                                        │
+worker: claim due rows (FOR UPDATE SKIP LOCKED, lease) ─► POST signed body to merchant ─┘
+        2xx ► delivered     else ► retry later (jittered backoff, Retry-After)     max attempts ► dead
+```
+
+| Rule | How |
+|---|---|
+| The event exists exactly when the final status does | written inside `applyProcessorOutcome`, in the same transaction as the status change and the ledger posting; if booking fails, no event |
+| One event per fact, whichever path got there | `dedupe_key` such as `payment.succeeded:attempt:12` is unique; the API answer, the webhook and a replay all converge on one row |
+| Several workers can run | `FOR UPDATE SKIP LOCKED` hands each row to one claimer without anyone waiting for anyone |
+| A crashed worker loses nothing | a claim is a **lease** (`locked_until`); when it runs out the row is due again. The attempt counter goes up at claim time, so a poison event cannot loop forever |
+| A slow merchant cannot hold up the rest | a batch is delivered concurrently, and each delivery has a timeout well inside the lease |
+| A stale worker cannot overwrite a newer one | retry and dead updates are fenced on the attempt number; a success is always recorded |
+| Merchants can deduplicate | the event id (`evt_out_<id>`, header `X-Event-Id`) and the body bytes are identical on every retry |
+| Merchants can trust it | body signed with the merchant's own secret, same `t=...,v1=...` scheme as the processor's webhooks, header `Platform-Signature` |
+| Redirects are not followed | a signed body must not travel to a URL the merchant never registered |
+
+Statuses: `pending` (waiting, possibly for a retry), `delivered` (2xx), `skipped` (the merchant had no webhook URL when
+we got there), `dead` (gave up after `OUTBOX_MAX_ATTEMPTS`; `listDeadOutboxEvents` shows them, `requeueDeadOutboxEvent`
+puts one back once the merchant is fixed). Delivered and skipped rows are frozen by trigger; DELETE stays allowed for retention.
+
+`findAttemptsMissingOutboxEvent(db)` asks the invariant question afterwards ("is there a final attempt nobody was told
+about?"); API tests run it after every test.
+
+Merchant events: `payment.succeeded` and `payment.failed`, with `payment_id`, `order_id`, `amount`, `currency`,
+`attempt_id`, `attempt_number` and `failure_code`. `pending`, `processing` and `requires_action` are not news yet.
+
+### Known gaps, by design
+
+- Merchants cannot set their own webhook URL through the API yet (the columns exist, migration 0008); real
+  authentication and merchant management come in Stage 11.
+- Nothing stops a merchant registering an internal address as their URL (a server-side request forgery risk). That check belongs to Stage 11.
+- Delivery order between events of one merchant is not guaranteed (a retried event can arrive after a later one);
+  every event carries `created` and the full payment facts, so the receiver can tell which is newer.
+- No alert when events go dead or the queue backs up; Stage 10.
+
+### Deliberate differences from the lectures
+
+1. Postgres is the queue; BullMQ and Redis are not used. The row has to exist in the payment transaction anyway, and a
+   second queue would be a second place for an event to be lost or duplicated. A queue can be added later in front of the relay.
+2. The attempt counter increments at claim time, not at failure time (so a worker that dies mid-delivery still counts).
+3. `Retry-After` is capped by the policy maximum, so a merchant cannot park an event for days.
 
 ## Why these versions
 

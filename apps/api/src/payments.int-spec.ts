@@ -1,7 +1,8 @@
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
+import { sql } from 'kysely';
 import type { Kysely } from 'kysely';
-import { checkLedgerInvariants, createDb, DB } from '@app/db';
+import { checkLedgerInvariants, createDb, DB, findAttemptsMissingOutboxEvent } from '@app/db';
 import type { Database } from '@app/db';
 import { createMerchant, startMigratedPostgres, TestPostgres, uid } from '@app/testing';
 import { FakeProcessorModule } from '../../fake-processor/src/fake-processor.module';
@@ -41,7 +42,7 @@ describe('POST /v1/payments (API + Postgres + fake processor)', () => {
       .overrideProvider(PROCESSOR_CLIENT_OPTIONS)
       .useValue({ baseUrl: processorBase, timeoutMs: 300 })
       .overrideProvider(PAYMENT_FLOW_OPTIONS)
-      .useValue({ callRetries: 2, retryDelayMs: 5, feeBps: 150 })
+      .useValue({ callRetries: 2, retryDelayMs: 5, retryMaxDelayMs: 20, random: () => 0.5, feeBps: 150 })
       .compile();
     api = apiModule.createNestApplication<NestExpressApplication>({ logger: false });
     await api.listen(0, '127.0.0.1');
@@ -60,6 +61,8 @@ describe('POST /v1/payments (API + Postgres + fake processor)', () => {
   // without one, debits equal credits.
   afterEach(async () => {
     expect(await checkLedgerInvariants(pg.db)).toEqual([]);
+    // ...and every final attempt told the merchant (the outbox event is written with the final status).
+    expect(await findAttemptsMissingOutboxEvent(pg.db)).toEqual([]);
   });
 
   beforeEach(async () => {
@@ -404,6 +407,22 @@ describe('POST /v1/payments (API + Postgres + fake processor)', () => {
       expect((await processorStats()).replays).toBe(0); // nothing had been charged, so nothing to replay
     });
 
+    it('pauses between retries by the jittered backoff policy, not a fixed doubling', async () => {
+      // random is pinned to 0.5 in this suite: with a 5 ms base the policy waits floor(0.5 * 5) = 2 ms,
+      // then floor(0.5 * 10) = 5 ms. Plain doubling would have waited 5 ms, then 10 ms.
+      const spy = jest.spyOn(global, 'setTimeout');
+      try {
+        await rule({ fault: 'gateway_error', times: 2 });
+        expect((await pay(newOrder())).status).toBe(201);
+        const delays = spy.mock.calls.map((c) => c[1]);
+        const sleeps = delays.filter((d) => d === 2 || d === 5);
+        expect(sleeps).toEqual(expect.arrayContaining([2, 5]));
+        expect(delays).not.toContain(10);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('a response slower than our timeout is not a failure: we ask again and get the charge that was made', async () => {
       await rule({ responseDelayMs: 800 }); // charge happens, reply arrives after the 300 ms timeout
       const order = newOrder();
@@ -712,6 +731,44 @@ describe('POST /v1/payments (API + Postgres + fake processor)', () => {
       const retry = await pay(order, { key });
       expect(retry.status).not.toBe(201);
       expect(await processorCharges()).toHaveLength(1);
+    });
+  });
+  describe('merchant notification (Stage 8)', () => {
+    const outboxFor = (orderId: string) =>
+      pg.db
+        .selectFrom('outbox_events as o')
+        .innerJoin('payment_attempts as a', (j) => j.on(sql<boolean>`o.dedupe_key like '%:attempt:' || a.id`))
+        .innerJoin('payment_intents as i', 'i.id', 'a.payment_intent_id')
+        .select(['o.event_type', 'o.status', 'o.payload'])
+        .where('i.order_id', '=', orderId)
+        .execute();
+
+    it('a successful payment queues exactly one payment.succeeded event for the merchant', async () => {
+      const order = newOrder();
+      const key = `key-${uid()}`;
+      for (let i = 0; i < 3; i++) await pay(order, { key }); // replays must not queue again
+      const events = await outboxFor(order.order_id);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ event_type: 'payment.succeeded', status: 'pending' });
+    });
+
+    it('a declined payment queues payment.failed', async () => {
+      const order = newOrder({ source: 'tok_declined' });
+      await pay(order);
+      expect((await outboxFor(order.order_id)).map((e) => e.event_type)).toEqual(['payment.failed']);
+    });
+
+    it('a payment that is still processing tells the merchant nothing yet', async () => {
+      const order = newOrder({ source: 'tok_pending' });
+      await pay(order);
+      expect(await outboxFor(order.order_id)).toEqual([]);
+    });
+
+    it('rolls back with everything else when booking fails: no event for a payment that is not finished', async () => {
+      await pg.db.insertInto('ledger_accounts').values({ code: `merchant_payable:${merchantId}:GHS`, kind: 'expense', currency: 'GHS' }).execute();
+      const order = newOrder({ currency: 'GHS' });
+      expect((await pay(order)).status).toBe(500);
+      expect(await outboxFor(order.order_id)).toEqual([]);
     });
   });
 });

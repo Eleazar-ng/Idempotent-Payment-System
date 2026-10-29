@@ -9,3 +9,4 @@ export * from './payments';
 export * from './ledger';
 export * from './invariants';
 export * from './webhooks';
+export * from './outbox';

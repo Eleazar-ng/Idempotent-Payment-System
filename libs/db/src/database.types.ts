@@ -34,6 +34,9 @@ export type LedgerSourceType = 'payment_attempt' | 'refund' | 'payout';
 export interface MerchantsTable {
   id: Generated<number>;
   name: string;
+  /** Where outbox events are delivered (migration 0008). Both set or both null. */
+  webhook_url: Nullable<string>;
+  webhook_secret: Nullable<string>;
   created_at: Generated<Date>;
 }
 
@@ -142,6 +145,23 @@ export interface WebhookEventsTable {
   processed_at: Nullable<Date>;
 }
 
+export type OutboxStatus = 'pending' | 'delivered' | 'skipped' | 'dead';
+
+export interface OutboxEventsTable {
+  id: Generated<number>;
+  dedupe_key: string;
+  merchant_id: number;
+  event_type: string;
+  payload: ColumnType<Json, string, string>;
+  status: Generated<OutboxStatus>;
+  attempts: Generated<number>;
+  next_attempt_at: Generated<Date>;
+  locked_until: Nullable<Date>;
+  last_error: Nullable<string>;
+  created_at: Generated<Date>;
+  delivered_at: Nullable<Date>;
+}
+
 export interface SchemaMigrationsTable {
   name: string;
   checksum: string;
@@ -160,6 +180,7 @@ export interface Database {
   ledger_entries: LedgerEntriesTable;
   ledger_account_balances: LedgerAccountBalancesView;
   webhook_events: WebhookEventsTable;
+  outbox_events: OutboxEventsTable;
   schema_migrations: SchemaMigrationsTable;
 }
 
@@ -172,3 +193,4 @@ export type PaymentAttemptUpdate = Updateable<PaymentAttemptsTable>;
 export type IdempotencyKey = Selectable<IdempotencyKeysTable>;
 export type NewIdempotencyKey = Insertable<IdempotencyKeysTable>;
 export type WebhookEvent = Selectable<WebhookEventsTable>;
+export type OutboxEvent = Selectable<OutboxEventsTable>;
