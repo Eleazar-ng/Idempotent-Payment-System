@@ -17,6 +17,7 @@ import {
   assertValidIdempotencyKey,
   conflictResponse,
   InvalidIdempotencyKeyError,
+  retryDelayMs,
 } from '@app/payments-core';
 import type { ProcessorOutcome } from '@app/payments-core';
 import { paymentResult, paymentView, problem } from './payment-http';
@@ -28,7 +29,12 @@ export const PAYMENT_FLOW_OPTIONS = Symbol('PAYMENT_FLOW_OPTIONS');
 export interface PaymentFlowOptions {
   /** Extra tries after an unknown outcome, all with the same processor idempotency key. */
   callRetries: number;
+  /** Base of the jittered exponential backoff between those tries (the ceiling for the first pause). */
   retryDelayMs: number;
+  /** No single pause is ever longer than this. */
+  retryMaxDelayMs: number;
+  /** Random source for the jitter. Tests pin it; production leaves it out (Math.random). */
+  random?: () => number;
   /** The platform's fee in basis points, booked on every successful payment. */
   feeBps: number;
 }
@@ -249,7 +255,15 @@ export class PaymentsService {
       if (outcome.kind !== 'unknown') return outcome;
 
       this.logger.warn(`attempt ${attempt.id}: unknown outcome (${outcome.reason}), try ${tryNumber + 1}`);
-      if (tryNumber < this.options.callRetries) await sleep(this.options.retryDelayMs * 2 ** tryNumber);
+      if (tryNumber < this.options.callRetries) {
+        await sleep(
+          retryDelayMs(
+            { baseDelayMs: this.options.retryDelayMs, maxDelayMs: Math.max(this.options.retryMaxDelayMs, this.options.retryDelayMs) },
+            tryNumber,
+            { random: this.options.random },
+          ),
+        );
+      }
     }
     return outcome; // still unknown: the attempt stays in calling_processor for recovery
   }

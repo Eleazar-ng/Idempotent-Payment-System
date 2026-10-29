@@ -34,6 +34,7 @@ import { ApiService } from './api.service';
       useFactory: (config: ConfigService<Env, true>): PaymentFlowOptions => ({
         callRetries: config.get('PROCESSOR_CALL_RETRIES', { infer: true }),
         retryDelayMs: config.get('PROCESSOR_RETRY_DELAY_MS', { infer: true }),
+        retryMaxDelayMs: config.get('PROCESSOR_RETRY_MAX_DELAY_MS', { infer: true }),
         feeBps: config.get('PLATFORM_FEE_BPS', { infer: true }),
       }),
     },

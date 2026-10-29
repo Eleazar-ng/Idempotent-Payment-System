@@ -15,7 +15,27 @@ describe('loadEnv', () => {
     expect(env.PROCESSOR_TIMEOUT_MS).toBe(5000);
     expect(env.PROCESSOR_CALL_RETRIES).toBe(2);
     expect(env.PROCESSOR_RETRY_DELAY_MS).toBe(200);
+    expect(env.PROCESSOR_RETRY_MAX_DELAY_MS).toBe(2000);
     expect(env.PLATFORM_FEE_BPS).toBe(150);
+    expect(env).toMatchObject({
+      OUTBOX_POLL_INTERVAL_MS: 1000,
+      OUTBOX_BATCH_SIZE: 50,
+      OUTBOX_MAX_ATTEMPTS: 10,
+      OUTBOX_LEASE_MS: 60_000,
+      OUTBOX_DELIVERY_TIMEOUT_MS: 5000,
+      OUTBOX_RETRY_BASE_MS: 1000,
+      OUTBOX_RETRY_MAX_MS: 3_600_000,
+    });
+  });
+
+  it.each([
+    ['OUTBOX_BATCH_SIZE', '0'],
+    ['OUTBOX_BATCH_SIZE', '501'],
+    ['OUTBOX_MAX_ATTEMPTS', '0'],
+    ['OUTBOX_POLL_INTERVAL_MS', '0'],
+    ['OUTBOX_LEASE_MS', '-5'],
+  ])('refuses %s=%s', (name, value) => {
+    expect(() => loadEnv({ ...valid, [name]: value })).toThrow(new RegExp(name));
   });
 
   it.each(['-1', '10001', '1.5'])('refuses a fee of %s basis points', (bps) => {

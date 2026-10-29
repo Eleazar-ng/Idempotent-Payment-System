@@ -2,7 +2,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
 import { sql } from 'kysely';
 import type { Kysely } from 'kysely';
-import { checkLedgerInvariants, createDb, DB } from '@app/db';
+import { checkLedgerInvariants, createDb, DB, findAttemptsMissingOutboxEvent } from '@app/db';
 import type { Database } from '@app/db';
 import { signWebhook, WEBHOOK_SIGNATURE_HEADER } from '@app/payments-core';
 import { createMerchant, startMigratedPostgres, TestPostgres, uid } from '@app/testing';
@@ -44,7 +44,7 @@ describe('POST /webhooks/processor (API + Postgres + fake processor)', () => {
       .overrideProvider(PROCESSOR_CLIENT_OPTIONS)
       .useValue({ baseUrl: processorBase, timeoutMs: 300 })
       .overrideProvider(PAYMENT_FLOW_OPTIONS)
-      .useValue({ callRetries: 2, retryDelayMs: 5, feeBps: 150 })
+      .useValue({ callRetries: 2, retryDelayMs: 5, retryMaxDelayMs: 20, feeBps: 150 })
       .compile();
     api = apiModule.createNestApplication<NestExpressApplication>({ logger: false, ...NEST_APP_OPTIONS });
     await api.listen(0, '127.0.0.1');
@@ -69,6 +69,8 @@ describe('POST /webhooks/processor (API + Postgres + fake processor)', () => {
 
   afterEach(async () => {
     expect(await checkLedgerInvariants(pg.db)).toEqual([]);
+    // ...and every final attempt told the merchant (the outbox event is written with the final status).
+    expect(await findAttemptsMissingOutboxEvent(pg.db)).toEqual([]);
   });
 
   // ---- helpers ---------------------------------------------------------------------------------

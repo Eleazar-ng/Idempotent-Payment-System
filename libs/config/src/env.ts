@@ -22,8 +22,23 @@ export const envSchema = z.object({
   PROCESSOR_CALL_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
   /** First pause between those tries; doubles each time. */
   PROCESSOR_RETRY_DELAY_MS: z.coerce.number().int().min(0).default(200),
+  /** Upper bound for any single pause between processor retries (jittered backoff never exceeds it). */
+  PROCESSOR_RETRY_MAX_DELAY_MS: z.coerce.number().int().min(0).default(2000),
   /** The platform's fee on each successful payment, in basis points (150 = 1.5%). Booked to the ledger. */
   PLATFORM_FEE_BPS: z.coerce.number().int().min(0).max(10_000).default(150),
+
+  /** How often the worker looks for outbox events when the last pass found none. */
+  OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(1000),
+  /** Most events one pass claims; they are delivered concurrently. */
+  OUTBOX_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(50),
+  /** Deliveries tried (the first included) before an event is parked as dead. */
+  OUTBOX_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(50).default(10),
+  /** How long a claimed event is held for one worker. Must exceed OUTBOX_DELIVERY_TIMEOUT_MS. */
+  OUTBOX_LEASE_MS: z.coerce.number().int().positive().default(60_000),
+  OUTBOX_DELIVERY_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+  /** Retry spacing for merchant deliveries: jittered exponential from this base up to the max. */
+  OUTBOX_RETRY_BASE_MS: z.coerce.number().int().min(0).default(1000),
+  OUTBOX_RETRY_MAX_MS: z.coerce.number().int().min(0).default(3_600_000),
   /** Shared secret used to sign and verify webhooks (Stage 4 and Stage 7). */
   PROCESSOR_WEBHOOK_SECRET: z.string().min(16, 'PROCESSOR_WEBHOOK_SECRET must be at least 16 chars'),
   /** Optional: where the fake processor delivers webhooks at start-up (can also be set at runtime). */

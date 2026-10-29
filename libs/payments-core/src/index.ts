@@ -13,3 +13,5 @@ export * from './attempt-keys';
 export * from './payment-status';
 export * from './ledger-posting';
 export * from './webhook-event';
+export * from './retry-policy';
+export * from './merchant-event';
