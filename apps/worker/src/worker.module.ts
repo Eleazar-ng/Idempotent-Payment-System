@@ -7,6 +7,9 @@ import { WorkerController } from './worker.controller';
 import { WorkerService } from './worker.service';
 import { OUTBOX_LOOP_OPTIONS, OutboxRelayService } from './outbox-relay.service';
 import type { OutboxLoopOptions } from './outbox-relay.service';
+import { PROCESSOR_LOOKUP, RECOVERY_OPTIONS, RecoveryService } from './recovery.service';
+import type { RecoveryLoopOptions } from './recovery.service';
+import { ProcessorLookup } from './processor-lookup';
 
 @Module({
   imports: [AppConfigModule, DbModule],
@@ -34,6 +37,40 @@ import type { OutboxLoopOptions } from './outbox-relay.service';
       }),
     },
     OutboxRelayService,
+    {
+      provide: PROCESSOR_LOOKUP,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService<Env, true>) =>
+        new ProcessorLookup({
+          baseUrl: config.get('PROCESSOR_BASE_URL', { infer: true }),
+          timeoutMs: config.get('PROCESSOR_TIMEOUT_MS', { infer: true }),
+        }),
+    },
+    {
+      provide: RECOVERY_OPTIONS,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService<Env, true>): RecoveryLoopOptions => {
+        const policy = {
+          stuckAfterMs: config.get('RECOVERY_STUCK_AFTER_MS', { infer: true }),
+          abandonedGraceMs: config.get('RECOVERY_ABANDONED_GRACE_MS', { infer: true }),
+        };
+        const feeBps = config.get('PLATFORM_FEE_BPS', { infer: true });
+        return {
+          sweepIntervalMs: config.get('RECOVERY_INTERVAL_MS', { infer: true }),
+          reconcileIntervalMs: config.get('RECONCILIATION_INTERVAL_MS', { infer: true }),
+          sweeper: {
+            ...policy,
+            feeBps,
+            pendingAfterMs: config.get('RECOVERY_PENDING_AFTER_MS', { infer: true }),
+            claimStaleAfterMs: config.get('RECOVERY_CLAIM_STALE_AFTER_MS', { infer: true }),
+            batchSize: config.get('RECOVERY_BATCH_SIZE', { infer: true }),
+            concurrency: 5,
+          },
+          reconciler: { ...policy, feeBps, lookbackMs: config.get('RECONCILIATION_LOOKBACK_MS', { infer: true }) },
+        };
+      },
+    },
+    RecoveryService,
   ],
 })
 export class WorkerModule {}

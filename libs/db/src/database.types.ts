@@ -162,6 +162,24 @@ export interface OutboxEventsTable {
   delivered_at: Nullable<Date>;
 }
 
+export type FindingSource = 'recovery' | 'reconciliation' | 'webhook';
+
+export interface ReconciliationFindingsTable {
+  id: Generated<number>;
+  dedupe_key: string;
+  kind: string;
+  source: FindingSource;
+  attempt_id: Nullable<number>;
+  charge_id: Nullable<string>;
+  detail: string;
+  status: Generated<'open' | 'resolved'>;
+  seen_count: Generated<number>;
+  first_seen_at: Generated<Date>;
+  last_seen_at: Generated<Date>;
+  resolved_at: Nullable<Date>;
+  resolution: Nullable<string>;
+}
+
 export interface SchemaMigrationsTable {
   name: string;
   checksum: string;
@@ -181,6 +199,7 @@ export interface Database {
   ledger_account_balances: LedgerAccountBalancesView;
   webhook_events: WebhookEventsTable;
   outbox_events: OutboxEventsTable;
+  reconciliation_findings: ReconciliationFindingsTable;
   schema_migrations: SchemaMigrationsTable;
 }
 
@@ -194,3 +213,4 @@ export type IdempotencyKey = Selectable<IdempotencyKeysTable>;
 export type NewIdempotencyKey = Insertable<IdempotencyKeysTable>;
 export type WebhookEvent = Selectable<WebhookEventsTable>;
 export type OutboxEvent = Selectable<OutboxEventsTable>;
+export type ReconciliationFinding = Selectable<ReconciliationFindingsTable>;

@@ -25,6 +25,14 @@ describe('loadEnv', () => {
       OUTBOX_DELIVERY_TIMEOUT_MS: 5000,
       OUTBOX_RETRY_BASE_MS: 1000,
       OUTBOX_RETRY_MAX_MS: 3_600_000,
+      RECOVERY_INTERVAL_MS: 30_000,
+      RECOVERY_STUCK_AFTER_MS: 120_000,
+      RECOVERY_PENDING_AFTER_MS: 900_000,
+      RECOVERY_ABANDONED_GRACE_MS: 90_000_000,
+      RECOVERY_CLAIM_STALE_AFTER_MS: 300_000,
+      RECOVERY_BATCH_SIZE: 100,
+      RECONCILIATION_INTERVAL_MS: 3_600_000,
+      RECONCILIATION_LOOKBACK_MS: 172_800_000,
     });
   });
 
@@ -34,6 +42,9 @@ describe('loadEnv', () => {
     ['OUTBOX_MAX_ATTEMPTS', '0'],
     ['OUTBOX_POLL_INTERVAL_MS', '0'],
     ['OUTBOX_LEASE_MS', '-5'],
+    ['RECOVERY_INTERVAL_MS', '0'],
+    ['RECOVERY_BATCH_SIZE', '1001'],
+    ['RECONCILIATION_LOOKBACK_MS', '-1'],
   ])('refuses %s=%s', (name, value) => {
     expect(() => loadEnv({ ...valid, [name]: value })).toThrow(new RegExp(name));
   });

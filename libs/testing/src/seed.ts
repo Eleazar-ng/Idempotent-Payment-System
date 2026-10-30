@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { Kysely, sql } from 'kysely';
-import { postAttemptSuccess } from '../../db/src';
+import { enqueuePaymentEvent, postAttemptSuccess } from '../../db/src';
 import type { Database, PaymentAttemptStatus } from '../../db/src';
 
 /** Short random suffix so tests never collide on unique business keys. */
@@ -54,7 +54,8 @@ export async function createAttempt(
  * Moves an attempt to `status`, supplying the charge id or failure reason those states require.
  *
  * Moving to `succeeded` also books the ledger posting in the same transaction, because the
- * database refuses a success without one (migration 0006). Tests that need a bare, unbooked
+ * database refuses a success without one (migration 0006). Moving to `succeeded` or `failed` also
+ * queues the merchant event, as `applyProcessorOutcome` does (Stage 8). Tests that need a bare, unbooked
  * success must use raw SQL inside their own transaction and say so.
  */
 export async function setAttemptStatus(
@@ -73,6 +74,8 @@ export async function setAttemptStatus(
       .where('id', '=', attemptId)
       .execute();
     if (status === 'succeeded') await postAttemptSuccess(conn, attemptId, { feeBps: 0 });
+    // A final status always comes with its merchant event (Stage 8), as it does in production.
+    if (status === 'succeeded' || status === 'failed') await enqueuePaymentEvent(conn, attemptId);
   };
   await (db.isTransaction ? move(db) : db.transaction().execute(move));
 }

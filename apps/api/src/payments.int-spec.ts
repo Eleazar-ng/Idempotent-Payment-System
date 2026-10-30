@@ -670,6 +670,32 @@ describe('POST /v1/payments (API + Postgres + fake processor)', () => {
       expect(await ledgerLines(order.order_id)).toEqual([]);
     });
 
+    it('a slow success still settles an attempt the sweeper had already abandoned: one posting, 201', async () => {
+      await rule({ responseDelayMs: 250 }); // the charge is made, the reply arrives 250 ms later (inside our 300 ms timeout)
+      const order = newOrder();
+      const request = pay(order);
+
+      // While the call is in flight, recovery gives up on it.
+      let abandonedIt = false;
+      for (let i = 0; i < 100 && !abandonedIt; i++) {
+        const [attempt] = await attemptsFor(order.order_id);
+        if (attempt?.status === 'calling_processor') {
+          await pg.db.updateTable('payment_attempts').set({ status: 'abandoned' }).where('id', '=', attempt.id).where('status', '=', 'calling_processor').execute();
+          abandonedIt = true;
+        } else {
+          await new Promise((r) => setTimeout(r, 5));
+        }
+      }
+      expect(abandonedIt).toBe(true);
+
+      const reply = await request;
+      expect(reply.status).toBe(201);
+      expect(reply.body.status).toBe('succeeded');
+      expect((await attemptsFor(order.order_id)).map((a) => a.status)).toEqual(['succeeded']);
+      expect(await ledgerLines(order.order_id)).toHaveLength(3);
+      expect(await processorCharges()).toHaveLength(1);
+    });
+
     it('a retry after a lost response does not book a second time', async () => {
       await rule({ fault: 'drop_after' });
       const order = newOrder();
