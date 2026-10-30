@@ -284,7 +284,14 @@ export class PaymentsService {
     outcome: ProcessorOutcome,
   ): Promise<HttpResult> {
     return this.db.transaction().execute(async (trx) => {
-      await applyProcessorOutcome(trx, attempt.id, outcome, 'calling_processor', { feeBps: this.options.feeBps });
+      // A recovery sweep may have given up on this call (`abandoned`) while the processor was merely slow.
+      // A definitive answer is still the truth and settles it; `abandoned -> processing` is not a legal
+      // move, so an in-between answer only applies to an attempt still in calling_processor.
+      const from =
+        outcome.kind === 'succeeded' || outcome.kind === 'declined' || outcome.kind === 'rejected'
+          ? (['calling_processor', 'abandoned'] as const)
+          : (['calling_processor'] as const);
+      await applyProcessorOutcome(trx, attempt.id, outcome, from, { feeBps: this.options.feeBps });
 
       const record = await getPayment(trx, merchantId, intent.id);
       const result = paymentResult(record?.intent ?? intent, record?.latestAttempt ?? attempt);

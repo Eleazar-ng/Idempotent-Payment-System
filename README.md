@@ -17,8 +17,9 @@ controllable fake payment processor.
 | 6 | Ledger posting, atomic with the success transition | **done** |
 | 7 | Webhook receiver | **done** |
 | 8 | Outbox and a real retry policy (with jitter) | **done** |
-| 9 | Recovery and reconciliation (stuck attempts, missing webhooks) | next |
-| 10 to 12 | Observability, hardening, final | planned |
+| 9 | Recovery and reconciliation (stuck attempts, missing webhooks) | **done** |
+| 10 | Observability | next |
+| 11 to 12 | Hardening, final | planned |
 
 ## Layout
 
@@ -153,8 +154,8 @@ is the one the caller must send. `releaseClaim` abandons a claim only when no at
   To change hashing, add version 2 beside it. **Deploy order matters:** ship builds that can *read*
   version 2 everywhere before any build starts *writing* it, because a build that meets a version it does
   not know throws `UnknownHashVersionError` instead of guessing.
-- A claim whose request crashes before `completeKey` stays `in_flight` until recovery (Stage 9) deals with it;
-  `in_flight` results carry `created_at` so that stage can recognise a stuck claim.
+- A claim whose request crashes before `completeKey` stays `in_flight` until the recovery sweeper (Stage 9) deals with it:
+  it releases a claim that never got an attempt and finishes a key whose attempt has an answer.
 
 ### Deliberate differences from the lectures
 
@@ -264,9 +265,8 @@ and the unresolved attempt itself blocks any new payment for the order (409) unt
 
 ### Known gaps, by design
 
-- A `pending` or `requires_action` attempt is completed by the webhook (Stage 7). If the webhook never comes, nothing completes it until recovery (Stage 9).
-- If the process dies after an attempt exists but before the response is stored, the key stays in flight until the
-  recovery sweeper (Stage 9). Before an attempt exists the claim is released instead.
+- A `pending` or `requires_action` attempt is completed by the webhook (Stage 7). If the webhook never comes, the recovery sweeper (Stage 9) asks the processor.
+- If the process dies after an attempt exists but before the response is stored, the recovery sweeper (Stage 9) finishes the key. Before an attempt exists the claim is released instead.
 - Retries between processor calls use the jittered backoff policy from Stage 8 (`PROCESSOR_RETRY_DELAY_MS` up to `PROCESSOR_RETRY_MAX_DELAY_MS`).
 
 ### Deliberate differences from the lectures
@@ -353,13 +353,13 @@ What each verdict in `webhook_events.result` means:
 | `mismatch` | amount or currency differ from the payment | yes |
 | `conflict` | contradicts a final state (success for a failed attempt and the reverse), or a different charge id | yes |
 
-`listWebhookEventsNeedingAttention(db)` returns the last three kinds; they are the work queue for reconciliation (Stage 9).
+`listWebhookEventsNeedingAttention(db)` returns the last three kinds; reconciliation (Stage 9) copies them into `reconciliation_findings`, where each has an owner and a resolution.
 Rows are immutable once handled (triggers, `PY002` and `PY003`); `DELETE` stays possible for retention.
 
 ### Known gaps, by design
 
-- If the processor never sends the webhook (or gives up retrying), the attempt stays `processing` until Stage 9 asks the processor directly.
-- Conflicts and mismatches are logged and stored; nothing yet alerts or resolves them (Stages 9 and 10).
+- If the processor never sends the webhook (or gives up retrying), the recovery sweeper (Stage 9) asks the processor directly.
+- Conflicts and mismatches become findings (Stage 9); nothing alerts on them yet (Stage 10).
 - One shared secret, no rotation window wired in (`verifyWebhook` already accepts several; configuration comes in Stage 11).
 - Handling runs inside the HTTP request, on purpose: the work is one database transaction, and putting a queue in front of it would add a second place an event can be lost. (The outbox in Stage 8 is for what we send, not for what we receive.)
 
@@ -434,6 +434,82 @@ Merchant events: `payment.succeeded` and `payment.failed`, with `payment_id`, `o
    second queue would be a second place for an event to be lost or duplicated. A queue can be added later in front of the relay.
 2. The attempt counter increments at claim time, not at failure time (so a worker that dies mid-delivery still counts).
 3. `Retry-After` is capped by the policy maximum, so a merchant cannot park an event for days.
+
+## Recovery and reconciliation (Stage 9)
+
+Everything before this stage assumed the happy half of "unknown": the call timed out, we asked again, we got the answer.
+Stage 9 is for the payments nobody is looking at: the process died mid-call, the webhook never came, the processor
+and our books disagree. Two loops run in the worker, both reading the processor and neither guessing.
+
+### The decision function
+
+`decideRecovery(attempt, charge | null, policy)` in `payments-core` is pure and is the only place the rules live.
+The sweeper and the reconciler both call it, so they cannot disagree. It answers one of:
+`none`, `wait`, `apply {outcome}`, `abandon`, `fail_unreached`, `finding {kind, detail}`.
+
+| Attempt | Processor says | Decision |
+|---|---|---|
+| `calling_processor`, idle < `RECOVERY_STUCK_AFTER_MS` | anything | `wait` (the request may still be running) |
+| `calling_processor`, idle longer | no charge | `abandon` (outcome unknown, still blocks a new payment) |
+| `abandoned`, younger than `RECOVERY_ABANDONED_GRACE_MS` | no charge | `wait` |
+| `abandoned`, older than the grace | no charge | `fail_unreached` (`never_reached_processor`, 502) |
+| non-final | succeeded / failed / pending / requires_action | `apply` the matching outcome, if the move is legal |
+| final (`succeeded`, `failed`) | a charge that agrees | `none` |
+| final | a charge that contradicts it | `finding`, never an overwrite |
+| any | wrong amount/currency, another charge id, a charge for an attempt that never called | `finding` |
+
+Rules the code keeps: an attempt moves only on a **definitive** processor answer; **a lookup that fails changes nothing**
+(`ProcessorLookup` throws, it never returns `null` for an error, because `null` means "the processor has no such charge" and
+recovery acts on that); a final state is never overwritten; `requires_action` reaches `succeeded` through `processing`.
+
+### Recovery sweeper (`RecoverySweeper`, every `RECOVERY_INTERVAL_MS`)
+
+1. Releases claims older than `RECOVERY_CLAIM_STALE_AFTER_MS` that never got an attempt.
+2. Completes keys whose attempt is past `calling_processor` but whose request died (the client's retry now gets the real answer).
+3. Looks up each stuck attempt by `metadata.reference` (the processor idempotency key), applies the decision in **one transaction**
+   (attempt move, ledger posting, merchant event, key completion), each step conditional on the status it was decided against.
+   Several workers, webhooks and API requests can race; one wins and the rest report `stale` or `already_applied`.
+
+### Reconciler (`Reconciler`, every `RECONCILIATION_INTERVAL_MS`)
+
+Lists every processor charge, loads our attempts (everything created within `RECONCILIATION_LOOKBACK_MS`, plus every unresolved
+one however old), and runs the same decision for each. What is unambiguous is repaired; everything else is a row in
+`reconciliation_findings` (migration 0009), recorded once (`dedupe_key`) with `seen_count` rising when it comes back:
+
+`paid_but_failed`, `failed_but_charge_open`, `succeeded_but_charge_not_succeeded`, `success_without_charge`, `charge_missing`,
+`amount_mismatch`, `charge_id_conflict`, `orphan_charge`, `unexpected_charge`, plus `webhook_*` for the Stage 7 events that needed attention.
+
+- A finding closes itself ("no longer observed") only if its **subject was examined in this pass** and not flagged again. A finding about
+  something outside the lookback stays open: ageing out of a window is not a fix.
+- A finding a **person** resolved stays resolved even if the discrepancy persists (a refunded charge still reads as succeeded);
+  one the system closed reopens if it comes back. `resolveFinding(db, id, 'what was done')` requires a non-blank note.
+- If the processor cannot be listed the run aborts before touching anything, in particular before closing any finding.
+
+### API change
+
+A slow call that finally succeeds after the sweeper abandoned it still settles the attempt (`abandoned -> succeeded` is legal):
+the customer gets their 201 and one posting. `processing` and `requires_action` answers apply only to an attempt still in
+`calling_processor`, since `abandoned -> processing` is not a legal move.
+
+### Settings (worker)
+
+`RECOVERY_INTERVAL_MS` 30000, `RECOVERY_STUCK_AFTER_MS` 120000, `RECOVERY_PENDING_AFTER_MS` 900000, `RECOVERY_ABANDONED_GRACE_MS` 90000000 (25 h),
+`RECOVERY_CLAIM_STALE_AFTER_MS` 300000, `RECOVERY_BATCH_SIZE` 100, `RECONCILIATION_INTERVAL_MS` 3600000, `RECONCILIATION_LOOKBACK_MS` 172800000.
+It also uses `PROCESSOR_BASE_URL`, `PROCESSOR_TIMEOUT_MS` and `PLATFORM_FEE_BPS`.
+
+### Known gaps, by design
+
+- Findings are listed (`listOpenFindings`) but there is no API or alert for them yet (Stage 10 and later).
+- When an attempt is abandoned its key is completed with a 202 "processing" answer; that stored answer is **not** rewritten when the attempt
+  later settles, so a client replaying the key polls `GET /v1/payments/:id` for the final state.
+- The fake processor lists every charge with no pagination; a real processor needs paging in `listCharges`.
+- No refund flow yet, so a refunded charge would show as a finding for a person to close.
+
+### Deliberate differences from the lectures
+
+1. Discrepancies on final states are findings, not automatic corrections: moving money state on a guess is worse than a human looking once.
+2. The 25 hour grace before an abandoned attempt is failed covers the processor's 24 hour idempotency window plus margin: until then a retry could still replay a charge.
+3. The worker has its own small lookup client instead of reusing the API's, so the sweeper can distinguish "no charge" from "could not ask".
 
 ## Why these versions
 

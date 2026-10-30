@@ -40,6 +40,21 @@ export const envSchema = z.object({
   OUTBOX_RETRY_BASE_MS: z.coerce.number().int().min(0).default(1000),
   OUTBOX_RETRY_MAX_MS: z.coerce.number().int().min(0).default(3_600_000),
   /** Shared secret used to sign and verify webhooks (Stage 4 and Stage 7). */
+  /** How often the recovery sweeper looks for stuck attempts. */
+  RECOVERY_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+  /** An attempt sitting in calling_processor this long is presumed orphaned and looked up. */
+  RECOVERY_STUCK_AFTER_MS: z.coerce.number().int().positive().default(120_000),
+  /** processing / requires_action attempts idle this long are looked up (webhooks normally finish them). */
+  RECOVERY_PENDING_AFTER_MS: z.coerce.number().int().positive().default(900_000),
+  /** An abandoned attempt the processor has never heard of is failed only after this long (idempotency window plus margin). */
+  RECOVERY_ABANDONED_GRACE_MS: z.coerce.number().int().positive().default(90_000_000),
+  /** A claimed idempotency key with no attempt is released after this long. */
+  RECOVERY_CLAIM_STALE_AFTER_MS: z.coerce.number().int().positive().default(300_000),
+  RECOVERY_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
+  /** How often the full reconciliation runs. */
+  RECONCILIATION_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
+  /** Reconciliation compares attempts and charges created within this window. */
+  RECONCILIATION_LOOKBACK_MS: z.coerce.number().int().positive().default(172_800_000),
   PROCESSOR_WEBHOOK_SECRET: z.string().min(16, 'PROCESSOR_WEBHOOK_SECRET must be at least 16 chars'),
   /** Optional: where the fake processor delivers webhooks at start-up (can also be set at runtime). */
   FAKE_PROCESSOR_WEBHOOK_URL: z.string().min(1).optional(),
