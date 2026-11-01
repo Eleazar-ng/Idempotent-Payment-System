@@ -12,3 +12,4 @@ export * from './webhooks';
 export * from './outbox';
 export * from './payment-response';
 export * from './recovery';
+export * from './ops-stats';

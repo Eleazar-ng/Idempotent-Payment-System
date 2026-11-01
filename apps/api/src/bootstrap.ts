@@ -1,5 +1,6 @@
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
+import { JsonLogger, parseLogLevel } from '@app/observability';
 import { ApiModule } from './api.module';
 
 /**
@@ -13,7 +14,8 @@ import { ApiModule } from './api.module';
 export const NEST_APP_OPTIONS = { rawBody: true } as const;
 
 export async function createApp(): Promise<NestExpressApplication> {
-  const app = await NestFactory.create<NestExpressApplication>(ApiModule, NEST_APP_OPTIONS);
+  const logger = new JsonLogger({ level: parseLogLevel(process.env.LOG_LEVEL), service: 'api' });
+  const app = await NestFactory.create<NestExpressApplication>(ApiModule, { ...NEST_APP_OPTIONS, logger });
   app.enableShutdownHooks();
   return app;
 }

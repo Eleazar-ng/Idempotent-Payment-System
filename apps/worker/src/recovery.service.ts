@@ -2,6 +2,8 @@ import { Inject, Injectable, Logger, OnApplicationBootstrap, OnApplicationShutdo
 import type { Kysely } from 'kysely';
 import { DB } from '@app/db';
 import type { Database } from '@app/db';
+import { METRICS } from '@app/observability';
+import type { AppMetrics } from '@app/observability';
 import { PeriodicLoop } from './periodic-loop';
 import { ProcessorLookup } from './processor-lookup';
 import { RecoverySweeper } from './recovery-sweeper';
@@ -29,27 +31,45 @@ export class RecoveryService implements OnApplicationBootstrap, OnApplicationShu
     @Inject(DB) db: Kysely<Database>,
     @Inject(PROCESSOR_LOOKUP) lookup: ProcessorLookup,
     @Inject(RECOVERY_OPTIONS) options: RecoveryLoopOptions,
+    @Inject(METRICS) metrics: AppMetrics,
   ) {
     const log = (level: 'warn' | 'error', message: string) => this.logger[level](message);
-    const sweeper = new RecoverySweeper(db, lookup, { log, ...options.sweeper });
-    const reconciler = new Reconciler(db, lookup, { log, ...options.reconciler });
+    const onFinding = (kind: string) => metrics.findingsRecorded.inc({ kind });
+    const sweeper = new RecoverySweeper(db, lookup, { log, onFinding, ...options.sweeper });
+    const reconciler = new Reconciler(db, lookup, { log, onFinding, ...options.reconciler });
+    const ran = (job: string, result: 'ok' | 'error') => metrics.recoveryRuns.inc({ job, result });
     this.loops = [
       new PeriodicLoop(
         async () => {
           const s = await sweeper.runOnce();
+          ran('sweeper', 'ok');
+          metrics.recoveryActions.inc({ action: 'applied' }, s.applied);
+          metrics.recoveryActions.inc({ action: 'abandoned' }, s.abandoned);
+          metrics.recoveryActions.inc({ action: 'failed_unreached' }, s.failedUnreached);
+          metrics.recoveryActions.inc({ action: 'keys_completed' }, s.keysCompleted);
+          metrics.recoveryActions.inc({ action: 'claims_released' }, s.claimsReleased);
           if (s.examined + s.keysCompleted + s.claimsReleased > 0) {
             this.logger.log(`recovery pass: ${JSON.stringify(s)}`);
           }
         },
         options.sweepIntervalMs,
-        (e) => this.logger.error(`recovery pass failed: ${String(e)}`),
+        (e) => {
+          ran('sweeper', 'error');
+          this.logger.error(`recovery pass failed: ${String(e)}`);
+        },
       ),
       new PeriodicLoop(
         async () => {
-          this.logger.log(`reconciliation: ${JSON.stringify(await reconciler.runOnce())}`);
+          const r = await reconciler.runOnce();
+          ran('reconciler', 'ok');
+          metrics.recoveryActions.inc({ action: 'repaired' }, r.repaired);
+          this.logger.log(`reconciliation: ${JSON.stringify(r)}`);
         },
         options.reconcileIntervalMs,
-        (e) => this.logger.error(`reconciliation failed (nothing changed): ${String(e)}`),
+        (e) => {
+          ran('reconciler', 'error');
+          this.logger.error(`reconciliation failed (nothing changed): ${String(e)}`);
+        },
       ),
     ];
   }

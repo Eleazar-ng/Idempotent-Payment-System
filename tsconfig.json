@@ -35,17 +35,23 @@
       "@app/db/*": [
         "./libs/db/src/*"
       ],
-      "@app/testing": [
-        "./libs/testing/src"
+      "@app/observability": [
+        "./libs/observability/src"
       ],
-      "@app/testing/*": [
-        "./libs/testing/src/*"
+      "@app/observability/*": [
+        "./libs/observability/src/*"
       ],
       "@app/payments-core": [
         "./libs/payments-core/src"
       ],
       "@app/payments-core/*": [
         "./libs/payments-core/src/*"
+      ],
+      "@app/testing": [
+        "./libs/testing/src"
+      ],
+      "@app/testing/*": [
+        "./libs/testing/src/*"
       ]
     }
   },
