@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { AppConfigModule } from '@app/config';
 import type { Env } from '@app/config';
 import { DbModule } from '@app/db';
+import { ObservabilityModule } from '@app/observability';
 import { WorkerController } from './worker.controller';
 import { WorkerService } from './worker.service';
 import { OUTBOX_LOOP_OPTIONS, OutboxRelayService } from './outbox-relay.service';
@@ -10,9 +11,11 @@ import type { OutboxLoopOptions } from './outbox-relay.service';
 import { PROCESSOR_LOOKUP, RECOVERY_OPTIONS, RecoveryService } from './recovery.service';
 import type { RecoveryLoopOptions } from './recovery.service';
 import { ProcessorLookup } from './processor-lookup';
+import { WORKER_HTTP_OPTIONS, WorkerHttpService } from './worker-http.service';
+import type { WorkerHttpOptions } from './worker-http.service';
 
 @Module({
-  imports: [AppConfigModule, DbModule],
+  imports: [AppConfigModule, DbModule, ObservabilityModule],
   controllers: [WorkerController],
   providers: [
     WorkerService,
@@ -71,6 +74,16 @@ import { ProcessorLookup } from './processor-lookup';
       },
     },
     RecoveryService,
+    {
+      provide: WORKER_HTTP_OPTIONS,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService<Env, true>): WorkerHttpOptions => ({
+        port: config.get('WORKER_HTTP_PORT', { infer: true }),
+        metricsToken: config.get('METRICS_TOKEN', { infer: true }),
+        readinessTimeoutMs: config.get('READINESS_TIMEOUT_MS', { infer: true }),
+      }),
+    },
+    WorkerHttpService,
   ],
 })
 export class WorkerModule {}

@@ -2,6 +2,8 @@ import { Inject, Injectable, Logger, OnApplicationBootstrap, OnApplicationShutdo
 import type { Kysely } from 'kysely';
 import { DB } from '@app/db';
 import type { Database } from '@app/db';
+import { METRICS } from '@app/observability';
+import type { AppMetrics } from '@app/observability';
 import { OutboxRelay } from './outbox-relay';
 import type { OutboxRelayOptions } from './outbox-relay';
 
@@ -29,6 +31,7 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnApplication
   constructor(
     @Inject(DB) db: Kysely<Database>,
     @Inject(OUTBOX_LOOP_OPTIONS) private readonly options: OutboxLoopOptions,
+    @Inject(METRICS) private readonly metrics: AppMetrics,
   ) {
     this.relay = new OutboxRelay(db, {
       log: (level, message) => this.logger[level](message),
@@ -51,12 +54,18 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnApplication
       try {
         const summary = await this.relay.runOnce();
         busy = summary.claimed >= this.options.relay.batchSize;
+        this.metrics.recoveryRuns.inc({ job: 'outbox', result: 'ok' });
+        this.metrics.outboxDeliveries.inc({ result: 'delivered' }, summary.delivered);
+        this.metrics.outboxDeliveries.inc({ result: 'retried' }, summary.retried);
+        this.metrics.outboxDeliveries.inc({ result: 'dead' }, summary.dead);
+        this.metrics.outboxDeliveries.inc({ result: 'skipped' }, summary.skipped);
         if (summary.claimed > 0) {
           this.logger.log(
             `outbox pass: ${summary.delivered} delivered, ${summary.retried} to retry, ${summary.dead} dead, ${summary.skipped} skipped`,
           );
         }
       } catch (error) {
+        this.metrics.recoveryRuns.inc({ job: 'outbox', result: 'error' });
         this.logger.error(`outbox pass failed: ${String(error)}`);
       }
       if (!busy && !this.stopping) await sleep(this.options.pollIntervalMs);

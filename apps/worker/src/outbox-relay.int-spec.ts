@@ -9,6 +9,7 @@ import { EVENT_ID_HEADER, PLATFORM_SIGNATURE_HEADER, verifyWebhook } from '@app/
 import { createAttemptInStatus, createMerchant, startMigratedPostgres, TestPostgres, uid } from '@app/testing';
 import { OutboxRelay } from './outbox-relay';
 import type { OutboxRelayOptions } from './outbox-relay';
+import { createMetrics, METRICS } from '@app/observability';
 import { OUTBOX_LOOP_OPTIONS, OutboxRelayService } from './outbox-relay.service';
 
 interface Received {
@@ -331,9 +332,11 @@ describe('outbox relay (real Postgres, real HTTP merchant)', () => {
       const merchantId = await merchantWithHook();
       const { outboxId } = await paymentEvent(merchantId);
       const db = createDb(pg.connectionString, { maxConnections: 5 });
+      const metrics = createMetrics();
       const moduleRef = await Test.createTestingModule({
         providers: [
           { provide: DB, useValue: db },
+          { provide: METRICS, useValue: metrics },
           {
             provide: OUTBOX_LOOP_OPTIONS,
             useValue: { pollIntervalMs: 50, relay: { ...options(), now: undefined, random: undefined } },
@@ -349,6 +352,10 @@ describe('outbox relay (real Postgres, real HTTP merchant)', () => {
         await new Promise((r) => setTimeout(r, 50));
       }
       expect((await outbox(outboxId)).status).toBe('delivered');
+      // ...and the delivery was counted, so a stalled relay shows up as a flat line
+      const exposed = await metrics.registry.metrics();
+      expect(exposed).toMatch(/outbox_deliveries_total\{result="delivered"\} [1-9]/);
+      expect(exposed).toMatch(/recovery_runs_total\{job="outbox",result="ok"\} [1-9]/);
 
       await app.close(); // must resolve: the loop notices the stop flag
       await db.destroy();

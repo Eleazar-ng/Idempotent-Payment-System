@@ -3,6 +3,8 @@ import type { Kysely } from 'kysely';
 import { DB, handleWebhookEvent } from '@app/db';
 import type { Database } from '@app/db';
 import { parseWebhookEvent, verifyWebhook, WebhookPayloadError, WebhookSignatureError } from '@app/payments-core';
+import { METRICS } from '@app/observability';
+import type { AppMetrics } from '@app/observability';
 import { problem } from './payment-http';
 import type { HttpResult } from './payment-http';
 
@@ -37,12 +39,14 @@ export class WebhooksService {
   constructor(
     @Inject(DB) private readonly db: Kysely<Database>,
     @Inject(WEBHOOK_OPTIONS) private readonly options: WebhookOptions,
+    @Inject(METRICS) private readonly metrics: AppMetrics,
   ) {}
 
   async receive(input: { rawBody: Buffer | undefined; signature: string | undefined }): Promise<HttpResult> {
     if (!input.rawBody) {
       // rawBody is switched on in bootstrap.ts. If it is missing, every signature would fail
       // for a reason that looks like an attack; say what it really is.
+      this.metrics.webhookEvents.inc({ result: 'raw_body_unavailable' });
       this.logger.error('webhook received without raw body: is NEST_APP_OPTIONS.rawBody enabled?');
       return problem(400, 'raw_body_unavailable', 'The request body could not be read as raw bytes.');
     }
@@ -56,6 +60,7 @@ export class WebhooksService {
       });
     } catch (error) {
       if (error instanceof WebhookSignatureError) {
+        this.metrics.webhookEvents.inc({ result: 'rejected_signature' });
         this.logger.warn(`webhook rejected: ${error.reason}`);
         return problem(400, 'invalid_signature', 'The webhook signature could not be verified.');
       }
@@ -67,6 +72,7 @@ export class WebhooksService {
       parsed = parseWebhookEvent(input.rawBody);
     } catch (error) {
       if (error instanceof WebhookPayloadError) {
+        this.metrics.webhookEvents.inc({ result: 'rejected_payload' });
         this.logger.warn(`webhook with a valid signature but unusable body: ${error.message}`);
         return problem(400, 'invalid_payload', error.message);
       }
@@ -80,6 +86,7 @@ export class WebhooksService {
       feeBps: this.options.feeBps,
     });
 
+    this.metrics.webhookEvents.inc({ result: result.duplicate ? 'duplicate' : result.result });
     if (!result.duplicate && ['conflict', 'mismatch', 'unmatched'].includes(result.result)) {
       this.logger.error(
         `webhook ${parsed.event.eventId} recorded as ${result.result}: ${result.detail ?? ''} (needs reconciliation)`,

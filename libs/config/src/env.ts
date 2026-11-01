@@ -55,6 +55,14 @@ export const envSchema = z.object({
   RECONCILIATION_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
   /** Reconciliation compares attempts and charges created within this window. */
   RECONCILIATION_LOOKBACK_MS: z.coerce.number().int().positive().default(172_800_000),
+  /** debug, info, warn or error. Anything else means info. */
+  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  /** If set, GET /metrics needs `Authorization: Bearer <token>`. Leave unset only on a private network. */
+  METRICS_TOKEN: z.string().min(16, 'METRICS_TOKEN must be at least 16 chars').optional(),
+  /** GET /health/ready gives the database this long to answer before reporting 503. */
+  READINESS_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
+  /** The worker's own small HTTP listener (/metrics, /health, /health/ready). */
+  WORKER_HTTP_PORT: z.coerce.number().int().min(0).max(65535).default(3002),
   PROCESSOR_WEBHOOK_SECRET: z.string().min(16, 'PROCESSOR_WEBHOOK_SECRET must be at least 16 chars'),
   /** Optional: where the fake processor delivers webhooks at start-up (can also be set at runtime). */
   FAKE_PROCESSOR_WEBHOOK_URL: z.string().min(1).optional(),

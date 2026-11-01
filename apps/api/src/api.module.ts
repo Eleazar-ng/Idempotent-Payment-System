@@ -1,9 +1,15 @@
 import { Module } from '@nestjs/common';
+import type { MiddlewareConsumer, NestModule } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppConfigModule } from '@app/config';
 import type { Env } from '@app/config';
 import { DbModule } from '@app/db';
-import { HealthController } from './health.controller';
+import { httpMetricsMiddleware, METRICS, ObservabilityModule, requestIdMiddleware } from '@app/observability';
+import type { AppMetrics } from '@app/observability';
+import { Inject } from '@nestjs/common';
+import { HealthController, READINESS_TIMEOUT_MS} from './health.controller';
+import { METRICS_OPTIONS, MetricsController } from './metrics.controller';
+import type { MetricsOptions } from './metrics.controller';
 import { BalanceController, PaymentsController } from './payments.controller';
 import { PAYMENT_FLOW_OPTIONS, PaymentsService } from './payments.service';
 import type { PaymentFlowOptions } from './payments.service';
@@ -16,8 +22,8 @@ import { ApiController } from './api.controller';
 import { ApiService } from './api.service';
 
 @Module({
-  imports: [AppConfigModule, DbModule],
-  controllers: [ApiController, HealthController, PaymentsController, BalanceController, WebhooksController],
+  imports: [AppConfigModule, DbModule, ObservabilityModule],
+  controllers: [ApiController,MetricsController, HealthController, PaymentsController, BalanceController, WebhooksController],
   providers: [
     ApiService,
     {
@@ -46,9 +52,26 @@ import { ApiService } from './api.service';
         feeBps: config.get('PLATFORM_FEE_BPS', { infer: true }),
       }),
     },
+    {
+      provide: METRICS_OPTIONS,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService<Env, true>): MetricsOptions => ({ token: config.get('METRICS_TOKEN', { infer: true }) }),
+    },
+    {
+      provide: READINESS_TIMEOUT_MS,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService<Env, true>): number => config.get('READINESS_TIMEOUT_MS', { infer: true }),
+    },
     ProcessorClient,
     WebhooksService,
     PaymentsService,
   ],
 })
-export class ApiModule {}
+export class ApiModule implements NestModule {
+  constructor(@Inject(METRICS) private readonly metrics: AppMetrics) {}
+
+  /** Every request gets an id (echoed back, present on its log lines) and is counted and timed by route pattern. */
+  configure(consumer: MiddlewareConsumer): void {
+    consumer.apply(requestIdMiddleware, httpMetricsMiddleware(this.metrics)).forRoutes('*');
+  }
+}

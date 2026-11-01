@@ -18,8 +18,9 @@ controllable fake payment processor.
 | 7 | Webhook receiver | **done** |
 | 8 | Outbox and a real retry policy (with jitter) | **done** |
 | 9 | Recovery and reconciliation (stuck attempts, missing webhooks) | **done** |
-| 10 | Observability | next |
-| 11 to 12 | Hardening, final | planned |
+| 10 | Observability (JSON logs, request ids, metrics, readiness, alerts) | **done** |
+| 11 | Hardening (real auth, merchant webhook URLs, SSRF check) | next |
+| 12 | Final | planned |
 
 ## Layout
 
@@ -31,6 +32,7 @@ apps/
 libs/
   config/           zod-validated environment (fails fast on bad config)
   db/               Kysely setup, DbModule, SQL migrations (libs/db/migrations)
+  observability/    JSON logger with redaction, request ids, Prometheus metrics (Stage 10)
   payments-core/    State machines, canonical request hashing, key rules (later: ledger posting)
   testing/          Testcontainers Postgres helper, test env helpers
 ```
@@ -359,7 +361,7 @@ Rows are immutable once handled (triggers, `PY002` and `PY003`); `DELETE` stays 
 ### Known gaps, by design
 
 - If the processor never sends the webhook (or gives up retrying), the recovery sweeper (Stage 9) asks the processor directly.
-- Conflicts and mismatches become findings (Stage 9); nothing alerts on them yet (Stage 10).
+- Conflicts and mismatches become findings (Stage 9) and raise the `WebhookNeedsAttention` alert (Stage 10).
 - One shared secret, no rotation window wired in (`verifyWebhook` already accepts several; configuration comes in Stage 11).
 - Handling runs inside the HTTP request, on purpose: the work is one database transaction, and putting a queue in front of it would add a second place an event can be lost. (The outbox in Stage 8 is for what we send, not for what we receive.)
 
@@ -426,7 +428,7 @@ Merchant events: `payment.succeeded` and `payment.failed`, with `payment_id`, `o
 - Nothing stops a merchant registering an internal address as their URL (a server-side request forgery risk). That check belongs to Stage 11.
 - Delivery order between events of one merchant is not guaranteed (a retried event can arrive after a later one);
   every event carries `created` and the full payment facts, so the receiver can tell which is newer.
-- No alert when events go dead or the queue backs up; Stage 10.
+- Dead events and a lagging queue raise alerts (`OutboxDeadEvents`, `OutboxLagging`, Stage 10); requeueing is still done by hand.
 
 ### Deliberate differences from the lectures
 
@@ -499,7 +501,7 @@ It also uses `PROCESSOR_BASE_URL`, `PROCESSOR_TIMEOUT_MS` and `PLATFORM_FEE_BPS`
 
 ### Known gaps, by design
 
-- Findings are listed (`listOpenFindings`) but there is no API or alert for them yet (Stage 10 and later).
+- Findings are listed (`listOpenFindings`) and alerted on (Stage 10), but there is no API to resolve them; a person calls `resolveFinding`.
 - When an attempt is abandoned its key is completed with a 202 "processing" answer; that stored answer is **not** rewritten when the attempt
   later settles, so a client replaying the key polls `GET /v1/payments/:id` for the final state.
 - The fake processor lists every charge with no pagination; a real processor needs paging in `listCharges`.
@@ -510,6 +512,39 @@ It also uses `PROCESSOR_BASE_URL`, `PROCESSOR_TIMEOUT_MS` and `PLATFORM_FEE_BPS`
 1. Discrepancies on final states are findings, not automatic corrections: moving money state on a guess is worse than a human looking once.
 2. The 25 hour grace before an abandoned attempt is failed covers the processor's 24 hour idempotency window plus margin: until then a retry could still replay a charge.
 3. The worker has its own small lookup client instead of reusing the API's, so the sweeper can distinguish "no charge" from "could not ask".
+
+## Observability (Stage 10)
+
+Full detail, metric catalogue and runbooks: [docs/observability.md](docs/observability.md). Alert rules: [docs/alerts.yml](docs/alerts.yml).
+
+- **Logs.** One JSON object per line (`JsonLogger`), `LOG_LEVEL` controls the level. Every API request gets an `X-Request-Id`
+  (a caller's is kept only if it is short and plain), echoed in the response and on every log line the request causes.
+  Secrets, signatures, tokens and card sources are redacted by key name, and `Bearer` / `v1=` values are scrubbed from text.
+- **Metrics.** `GET /metrics` on the API and on the worker's own small listener (`WORKER_HTTP_PORT`, default 3002). `METRICS_TOKEN` makes it
+  require a bearer token. Labels are small fixed sets only (routes are patterns, unknown paths are `unmatched`); a test fails if a label could carry an id.
+- **Counters** for what happened: idempotency claims, payment outcomes, processor calls (including `unknown`), webhooks by result, outbox deliveries, recovery actions, findings by kind.
+- **State gauges** for what is *not* happening, read from Postgres at each scrape: oldest due outbox event, oldest idle attempt per status, open findings by kind,
+  final attempts without a merchant event, ledger invariant violations. If the database cannot be read, the gauges keep their last values and
+  `stats_scrape_errors_total` counts the failure; an outage must never look like a zero.
+- **Health.** `/health` is liveness and never touches the database; `/health/ready` runs `select 1` with a deadline and answers 503 `{"failed":["database"]}` without error text.
+- **Alerts.** 18 rules in `docs/alerts.yml`, each with a severity and a runbook anchor. A test checks every metric they use exists in the registry and every runbook link resolves.
+
+### Settings
+
+`LOG_LEVEL` info, `METRICS_TOKEN` (unset = open), `READINESS_TIMEOUT_MS` 2000, `WORKER_HTTP_PORT` 3002.
+
+### Known gaps, by design
+
+- No distributed tracing: a request id across two processes is enough for now.
+- `/metrics` is open unless `METRICS_TOKEN` is set; real deployments should also keep it off the public network (Stage 11).
+- The fake processor still logs with `console.log`.
+- Alert thresholds are starting points; they have not met production traffic.
+
+### Deliberate differences from the lectures
+
+1. Plain `prom-client` and an eighty-line logger instead of a tracing and logging stack.
+2. State gauges are queried at scrape time rather than kept in memory, so they survive restarts and cannot drift.
+3. The worker exposes its own HTTP listener, because a worker nobody can scrape fails silently.
 
 ## Why these versions
 

@@ -22,6 +22,8 @@ export interface RecoverySweeperOptions extends RecoveryPolicy {
   feeBps: number;
   now?: () => Date;
   log?: (level: 'warn' | 'error', message: string) => void;
+  /** Called for every finding recorded, so it can be counted by kind. */
+  onFinding?: (kind: string) => void;
 }
 
 export interface SweepSummary {
@@ -116,6 +118,7 @@ export class RecoverySweeper {
           detail: decision.detail,
           now,
         });
+        this.options.onFinding?.(decision.kind);
         this.log('error', `attempt ${candidate.attemptId}: ${decision.kind}: ${decision.detail}`);
         summary.findings++;
         return;

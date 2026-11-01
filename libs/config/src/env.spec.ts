@@ -33,7 +33,11 @@ describe('loadEnv', () => {
       RECOVERY_BATCH_SIZE: 100,
       RECONCILIATION_INTERVAL_MS: 3_600_000,
       RECONCILIATION_LOOKBACK_MS: 172_800_000,
+      LOG_LEVEL: 'info',
+      READINESS_TIMEOUT_MS: 2000,
+      WORKER_HTTP_PORT: 3002,
     });
+    expect(env.METRICS_TOKEN).toBeUndefined();
   });
 
   it.each([
@@ -43,6 +47,9 @@ describe('loadEnv', () => {
     ['OUTBOX_POLL_INTERVAL_MS', '0'],
     ['OUTBOX_LEASE_MS', '-5'],
     ['RECOVERY_INTERVAL_MS', '0'],
+    ['LOG_LEVEL', 'verbose'],
+    ['METRICS_TOKEN', 'too-short'],
+    ['WORKER_HTTP_PORT', '70000'],
     ['RECOVERY_BATCH_SIZE', '1001'],
     ['RECONCILIATION_LOOKBACK_MS', '-1'],
   ])('refuses %s=%s', (name, value) => {

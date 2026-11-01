@@ -17,6 +17,8 @@ export interface ReconcilerOptions extends RecoveryPolicy {
   feeBps: number;
   now?: () => Date;
   log?: (level: 'warn' | 'error', message: string) => void;
+  /** Called for every finding recorded, so it can be counted by kind. */
+  onFinding?: (kind: string) => void;
 }
 
 export interface ReconcileSummary {
@@ -97,6 +99,7 @@ export class Reconciler {
           detail: decision.detail,
           now: this.now(),
         });
+        this.options.onFinding?.(decision.kind);
         this.log('error', `reconciliation: attempt ${attempt.attemptId}: ${decision.kind}: ${decision.detail}`);
         summary.findingsRecorded++;
       } else if (decision.action === 'apply' || decision.action === 'abandon' || decision.action === 'fail_unreached') {
@@ -120,6 +123,7 @@ export class Reconciler {
         detail: `processor charge ${l.charge.id} (${l.charge.amount} ${l.charge.currency}, ${l.charge.status}) matches none of our attempts`,
         now: this.now(),
       });
+      this.options.onFinding?.('orphan_charge');
       this.log('error', `reconciliation: orphan charge ${l.charge.id}`);
       summary.findingsRecorded++;
     }

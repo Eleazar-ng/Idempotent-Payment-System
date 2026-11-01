@@ -20,6 +20,8 @@ import {
   retryDelayMs,
 } from '@app/payments-core';
 import type { ProcessorOutcome } from '@app/payments-core';
+import { METRICS } from '@app/observability';
+import type { AppMetrics } from '@app/observability';
 import { paymentResult, paymentView, problem } from './payment-http';
 import type { HttpResult } from './payment-http';
 import { ProcessorClient } from './processor.client';
@@ -70,6 +72,7 @@ export class PaymentsService {
     @Inject(DB) private readonly db: Kysely<Database>,
     private readonly processor: ProcessorClient,
     @Inject(PAYMENT_FLOW_OPTIONS) private readonly options: PaymentFlowOptions,
+    @Inject(METRICS) private readonly metrics: AppMetrics,
   ) {}
 
   async createPayment(input: { merchantId: unknown; idempotencyKey: unknown; body: unknown }): Promise<HttpResult> {
@@ -94,6 +97,7 @@ export class PaymentsService {
     const request = parsed.data;
 
     const claim = await claimKey(this.db, { merchantId, key, request: { operation: OPERATION, body: request } });
+    this.metrics.idempotencyClaims.inc({ result: claim.outcome });
     switch (claim.outcome) {
       case 'mismatch': {
         const { status, body } = conflictResponse('mismatch');
@@ -230,7 +234,9 @@ export class PaymentsService {
     }
 
     const outcome = await this.callProcessor(intent, attempt);
-    return this.settle(merchantId, key, intent, attempt, outcome);
+    const settled = await this.settle(merchantId, key, intent, attempt, outcome);
+    this.metrics.paymentOutcomes.inc({ result: outcome.kind });
+    return settled;
   }
 
   /**
@@ -241,6 +247,7 @@ export class PaymentsService {
   private async callProcessor(intent: PaymentIntent, attempt: PaymentAttempt): Promise<ProcessorOutcome> {
     let outcome: ProcessorOutcome = { kind: 'unknown', reason: 'not_called' };
     for (let tryNumber = 0; tryNumber <= this.options.callRetries; tryNumber++) {
+      const stopTimer = this.metrics.processorCallDuration.startTimer();
       outcome = await this.processor.charge({
         idempotencyKey: attempt.processor_idempotency_key,
         amount: intent.amount,
@@ -252,6 +259,8 @@ export class PaymentsService {
           order_id: intent.order_id,
         },
       });
+      stopTimer();
+      this.metrics.processorCalls.inc({ result: outcome.kind });
       if (outcome.kind !== 'unknown') return outcome;
 
       this.logger.warn(`attempt ${attempt.id}: unknown outcome (${outcome.reason}), try ${tryNumber + 1}`);

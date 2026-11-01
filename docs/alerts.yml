@@ -1,0 +1,142 @@
+# Prometheus alert rules for the payments demo (Stage 10).
+# Every metric named here is checked against the real registry by libs/observability/src/alerts.spec.ts,
+# so an alert cannot quietly point at a metric that was renamed. Keep each `expr` on one line.
+# Severity: critical = money may be wrong, page someone; warning = look during working hours.
+groups:
+  - name: money
+    rules:
+      - alert: LedgerInvariantBroken
+        expr: ledger_invariant_violations > 0
+        for: 0m
+        labels: { severity: critical }
+        annotations:
+          summary: Debits do not equal credits, or a success is not booked (or a booking has no success).
+          runbook: docs/observability.md#ledger-invariant-broken
+      - alert: FinalAttemptWithoutMerchantEvent
+        expr: attempts_missing_outbox_event > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: A payment reached a final state but the merchant will never be told.
+          runbook: docs/observability.md#final-attempt-without-merchant-event
+      - alert: MoneyDiscrepancyFinding
+        expr: reconciliation_findings_open{kind=~"paid_but_failed|success_without_charge|succeeded_but_charge_not_succeeded|amount_mismatch|charge_id_conflict|orphan_charge"} > 0
+        for: 0m
+        labels: { severity: critical }
+        annotations:
+          summary: Reconciliation found our books and the processor disagreeing about money. A person must resolve it.
+          runbook: docs/observability.md#money-discrepancy-finding
+      - alert: OtherFindingsOpen
+        expr: sum(reconciliation_findings_open) > 0
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: Findings have been open for an hour.
+          runbook: docs/observability.md#money-discrepancy-finding
+
+  - name: recovery
+    rules:
+      - alert: CallsStuckInFlight
+        expr: payment_attempts_oldest_idle_seconds{status="calling_processor"} > 600
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: An attempt has sat in calling_processor for over 10 minutes; the sweeper should have taken it.
+          runbook: docs/observability.md#stuck-attempts
+      - alert: PendingAttemptsNotSettling
+        expr: payment_attempts_oldest_idle_seconds{status=~"processing|requires_action"} > 7200
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: A pending payment has not moved for two hours, with neither webhook nor sweeper settling it.
+          runbook: docs/observability.md#stuck-attempts
+      - alert: AbandonedPastGrace
+        expr: payment_attempts_oldest_idle_seconds{status="abandoned"} > 93600
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: An abandoned attempt is older than the 25 hour grace plus an hour; the sweeper is not failing it.
+          runbook: docs/observability.md#stuck-attempts
+      - alert: BackgroundJobsFailing
+        expr: sum by (job) (increase(recovery_runs_total{result="error"}[15m])) > 3
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: A background job (sweeper, reconciler, outbox) keeps failing.
+          runbook: docs/observability.md#background-jobs
+      - alert: SweeperStalled
+        expr: increase(recovery_runs_total{job="sweeper",result="ok"}[10m]) == 0
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: The recovery sweeper has not completed a run in ten minutes.
+          runbook: docs/observability.md#background-jobs
+      - alert: WorkerMetricsMissing
+        expr: absent(outbox_oldest_due_age_seconds)
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: The worker is not being scraped, so every recovery and outbox alert is blind.
+          runbook: docs/observability.md#background-jobs
+      - alert: StateGaugesStale
+        expr: increase(stats_scrape_errors_total[10m]) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: The worker could not read the database for its gauges; their values are the last known ones.
+          runbook: docs/observability.md#background-jobs
+
+  - name: merchant-events
+    rules:
+      - alert: OutboxLagging
+        expr: outbox_oldest_due_age_seconds > 300
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Merchant events are waiting more than five minutes past their due time.
+          runbook: docs/observability.md#outbox
+      - alert: OutboxDeadEvents
+        expr: outbox_events{status="dead"} > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: Merchant events ran out of retries. Fix the endpoint, then requeue them.
+          runbook: docs/observability.md#outbox
+
+  - name: edge
+    rules:
+      - alert: ProcessorOutcomesUnknown
+        expr: sum(rate(processor_calls_total{result="unknown"}[5m])) / sum(rate(processor_calls_total[5m])) > 0.05
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: More than 5% of processor calls end with an unknown outcome. The processor or the network is unhealthy.
+          runbook: docs/observability.md#processor-outcomes-unknown
+      - alert: WebhookSignaturesFailing
+        expr: increase(webhook_events_total{result="rejected_signature"}[10m]) > 5
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: Several webhooks failed signature checks. Either the secret rotated or someone is forging events.
+          runbook: docs/observability.md#webhook-signatures-failing
+      - alert: WebhookNeedsAttention
+        expr: increase(webhook_events_total{result=~"conflict|mismatch|unmatched"}[1h]) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: The processor reported something that disagrees with our records.
+          runbook: docs/observability.md#money-discrepancy-finding
+      - alert: ApiServerErrors
+        expr: sum(rate(http_requests_total{status_class="5xx"}[5m])) / sum(rate(http_requests_total[5m])) > 0.02
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: More than 2% of API requests are failing with a 5xx.
+          runbook: docs/observability.md#api-errors-and-latency
+      - alert: ApiSlow
+        expr: histogram_quantile(0.99, sum by (le, route) (rate(http_request_duration_seconds_bucket[5m]))) > 5
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: The slowest one percent of requests on a route take over five seconds.
+          runbook: docs/observability.md#api-errors-and-latency

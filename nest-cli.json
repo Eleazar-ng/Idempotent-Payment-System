@@ -46,6 +46,15 @@
         "tsConfigPath": "apps/fake-processor/tsconfig.app.json"
       }
     },
+    "observability": {
+      "type": "library",
+      "root": "libs/observability",
+      "entryFile": "index",
+      "sourceRoot": "libs/observability/src",
+      "compilerOptions": {
+        "tsConfigPath": "libs/observability/tsconfig.lib.json"
+      }
+    },
     "payments-core": {
       "type": "library",
       "root": "libs/payments-core",
