@@ -69,6 +69,8 @@ describe('outbox relay (real Postgres, real HTTP merchant)', () => {
     leaseMs: 60_000,
     deliveryTimeoutMs: 400,
     retry: { baseDelayMs: 1000, maxDelayMs: 60_000, jitter: 'none' },
+    // the test merchant listens on 127.0.0.1 over http: allowed here, refused by default (see the destination policy tests below)
+    urlPolicy: { allowHttp: true, allowPrivateNetworks: true },
     now: () => clock,
     random: () => 0.5,
     ...over,
@@ -324,6 +326,77 @@ describe('outbox relay (real Postgres, real HTTP merchant)', () => {
 
     it('refuses a lease that is not longer than the delivery timeout', () => {
       expect(() => relay({ leaseMs: 400, deliveryTimeoutMs: 400 })).toThrow(/leaseMs/);
+    });
+  });
+
+  describe('where deliveries may go (Stage 11: SSRF)', () => {
+    const strict = { allowHttp: false, allowPrivateNetworks: false };
+    async function merchantAt(url: string) {
+      const merchantId = await createMerchant(pg.db);
+      await pg.db.updateTable('merchants').set({ webhook_url: url, webhook_secret: secret }).where('id', '=', merchantId).execute();
+      return merchantId;
+    }
+
+    it('a URL that points inside the network is never contacted, and the event is dead at once: retrying cannot change the answer', async () => {
+      const merchantId = await merchantAt(`${base}/hook`); // http://127.0.0.1:port: internal, and plain http
+      const { outboxId } = await paymentEvent(merchantId);
+
+      const summary = await relay({ urlPolicy: strict }).runOnce();
+
+      expect(summary).toMatchObject({ claimed: 1, dead: 1, retried: 0, delivered: 0 });
+      expect(received).toEqual([]);
+      const row = await outbox(outboxId);
+      expect(row.status).toBe('dead');
+      expect(row.last_error).toContain('blocked_destination');
+      expect(row.attempts).toBe(1);
+    });
+
+    it('a name that resolves to a private address is refused, even over https', async () => {
+      const merchantId = await merchantAt('https://hooks.merchant.example.com/pay');
+      const { outboxId } = await paymentEvent(merchantId);
+      const summary = await relay({ urlPolicy: strict, resolver: async () => ['169.254.169.254'] }).runOnce();
+      expect(summary.dead).toBe(1);
+      expect((await outbox(outboxId)).last_error).toContain('forbidden_address');
+      expect(received).toEqual([]);
+    });
+
+    it('a name whose answers mix public and private addresses is refused', async () => {
+      const merchantId = await merchantAt('https://hooks.merchant.example.com/pay');
+      const { outboxId } = await paymentEvent(merchantId);
+      await relay({ urlPolicy: strict, resolver: async () => ['93.184.216.34', '10.1.1.1'] }).runOnce();
+      expect((await outbox(outboxId)).status).toBe('dead');
+    });
+
+    it('a name that cannot be resolved right now is an ordinary failure: retried, not dead', async () => {
+      const merchantId = await merchantAt('https://hooks.merchant.example.com/pay');
+      const { outboxId } = await paymentEvent(merchantId);
+      const summary = await relay({
+        urlPolicy: strict,
+        resolver: async () => {
+          throw new Error('getaddrinfo EAI_AGAIN hooks.merchant.example.com');
+        },
+      }).runOnce();
+      expect(summary).toMatchObject({ retried: 1, dead: 0 });
+      expect((await outbox(outboxId)).status).toBe('pending');
+    });
+
+    it('when allowed, it connects to the address that was checked, with the merchant\'s name as Host', async () => {
+      const merchantId = await merchantAt(`http://hooks.merchant.test:${new URL(base).port}/hook`);
+      await paymentEvent(merchantId);
+      const summary = await relay({ urlPolicy: { allowHttp: true, allowPrivateNetworks: true }, resolver: async () => ['127.0.0.1'] }).runOnce();
+      expect(summary.delivered).toBe(1);
+      expect(received).toHaveLength(1);
+      expect(received[0].headers.host).toBe(`hooks.merchant.test:${new URL(base).port}`);
+    });
+
+    it('does not follow a redirect from the merchant, so the signed body goes nowhere else', async () => {
+      const merchantId = await merchantWithHook('/redirecting');
+      const { outboxId } = await paymentEvent(merchantId);
+      behaviour = () => ({ status: 302, headers: { location: `${base}/elsewhere` } });
+      const summary = await relay().runOnce();
+      expect(summary.retried).toBe(1);
+      expect((await outbox(outboxId)).last_error).toBe('http_302');
+      expect(received.map((r) => r.path)).toEqual(['/redirecting']);
     });
   });
 

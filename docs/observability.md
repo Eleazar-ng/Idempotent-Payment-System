@@ -39,6 +39,7 @@ that match no route share the single label `unmatched`, so a scanner cannot crea
 |---|---|---|
 | `http_requests_total` | method, route, status_class | Requests by route pattern (`/v1/payments/:id`). |
 | `http_request_duration_seconds` | method, route | Latency histogram. |
+| `auth_attempts_total` | result | `ok`, `missing` (no Authorization header) or `invalid` (any reason; the log line says which, by key prefix). |
 | `idempotency_claims_total` | result | `claimed`, `replay`, `in_flight`, `mismatch`. A rising `mismatch` is a client bug. |
 | `payment_outcomes_total` | result | How requests that did the work ended: `succeeded`, `declined`, `processing`, `requires_action`, `unknown`, `rejected`. |
 | `processor_calls_total` | result | Each call to the processor, classified. `unknown` means money may have moved. |
@@ -151,6 +152,14 @@ Expect `payment_outcomes_total{result="unknown"}` and then `recovery_actions_tot
 
 `rejected_signature` rising. Either the secret was rotated on one side only (`PROCESSOR_WEBHOOK_SECRET` accepts a list during rotation) or someone is posting forged events.
 Nothing from a rejected request is stored or applied. Check clock skew too: timestamps older than five minutes are refused.
+
+### Auth failures
+
+`auth_attempts_total{result="invalid"}` spiking. The caller always sees the same 401; the log says why, per attempt:
+`api key rejected: <reason> (prefix <12 hex>)` with reason `malformed`, `unknown`, `wrong_secret`, `revoked` or `expired`. Group the log lines
+by prefix. One prefix with `revoked` or `expired` is a merchant still running an old key: tell them, or ship the new one. Many different `unknown`
+prefixes from one source is guessing; 256-bit secrets cannot be guessed, but block the source. `result="missing"` is a client that never sends the header.
+`pnpm admin key:list <merchantId>` shows a merchant's keys and when each was last used.
 
 ### API errors and latency
 

@@ -5,7 +5,7 @@ import type { Kysely } from 'kysely';
 import { checkLedgerInvariants, createDb, DB, findAttemptsMissingOutboxEvent } from '@app/db';
 import type { Database } from '@app/db';
 import { signWebhook, WEBHOOK_SIGNATURE_HEADER } from '@app/payments-core';
-import { createMerchant, startMigratedPostgres, TestPostgres, uid } from '@app/testing';
+import { createMerchant, createTestApiKey, startMigratedPostgres, TestPostgres, uid } from '@app/testing';
 import { FakeProcessorModule } from '../../fake-processor/src/fake-processor.module';
 import { ApiModule } from './api.module';
 import { NEST_APP_OPTIONS } from './bootstrap';
@@ -27,6 +27,7 @@ describe('POST /webhooks/processor (API + Postgres + fake processor)', () => {
   let apiBase: string;
   let processorBase: string;
   let merchantId: number;
+  let apiKey: string;
   const secret = process.env.PROCESSOR_WEBHOOK_SECRET as string;
 
   beforeAll(async () => {
@@ -63,6 +64,7 @@ describe('POST /webhooks/processor (API + Postgres + fake processor)', () => {
     // refused delivery shows up as exactly one failed attempt.
     await control('PUT', '/webhook', { url: `${apiBase}/webhooks/processor`, maxRetries: 0, retryDelayMs: 0 });
     merchantId = await createMerchant(pg.db);
+    apiKey = await createTestApiKey(pg.db, merchantId);
     // Each test counts the events it caused (DELETE is allowed on purpose: retention cleanup).
     await pg.db.deleteFrom('webhook_events').execute();
   });
@@ -92,14 +94,14 @@ describe('POST /webhooks/processor (API + Postgres + fake processor)', () => {
   async function pay(source: string, over: Record<string, unknown> = {}) {
     const res = await fetch(`${apiBase}/v1/payments`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'idempotency-key': `key-${uid()}`, 'x-merchant-id': String(merchantId) },
+      headers: { 'content-type': 'application/json', 'idempotency-key': `key-${uid()}`, authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({ order_id: `ord_${uid()}`, amount: 5000, currency: 'NGN', source, ...over }),
     });
     return { status: res.status, body: (await res.json()) as any };
   }
 
   async function getPayment(id: string) {
-    const res = await fetch(`${apiBase}/v1/payments/${id}`, { headers: { 'x-merchant-id': String(merchantId) } });
+    const res = await fetch(`${apiBase}/v1/payments/${id}`, { headers: { authorization: `Bearer ${apiKey}` } });
     return (await res.json()) as any;
   }
 
@@ -162,7 +164,7 @@ describe('POST /webhooks/processor (API + Postgres + fake processor)', () => {
       expect(rows[0]).toMatchObject({ result: 'applied', event_type: 'charge.succeeded' });
 
       const balance = await (
-        await fetch(`${apiBase}/v1/balance`, { headers: { 'x-merchant-id': String(merchantId) } })
+        await fetch(`${apiBase}/v1/balance`, { headers: { authorization: `Bearer ${apiKey}` } })
       ).json();
       expect((balance as any).available).toEqual([{ currency: 'NGN', amount: 4925 }]);
     });

@@ -6,11 +6,13 @@
 const SENSITIVE_KEY = /secret|token|authorization|password|signature|api[-_]?key|cookie|source|card/i;
 const BEARER = /Bearer\s+[A-Za-z0-9._~+/=-]+/g;
 const SIGNATURE_VALUE = /\bv1=[0-9a-f]{16,}/gi;
+/** A whole API key (Stage 11). Only the public prefix may be logged; the secret part never. */
+const API_KEY = /\bpk_([0-9a-f]{12})_[A-Za-z0-9_-]{20,}/g;
 
 export const REDACTED = '[redacted]';
 
 export function scrubText(text: string): string {
-  return text.replace(BEARER, `Bearer ${REDACTED}`).replace(SIGNATURE_VALUE, `v1=${REDACTED}`);
+  return text.replace(BEARER, `Bearer ${REDACTED}`).replace(SIGNATURE_VALUE, `v1=${REDACTED}`).replace(API_KEY, `pk_$1_${REDACTED}`);
 }
 
 export function redact(value: unknown, depth = 0): unknown {

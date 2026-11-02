@@ -162,6 +162,18 @@ export interface OutboxEventsTable {
   delivered_at: Nullable<Date>;
 }
 
+export interface ApiKeysTable {
+  id: Generated<number>;
+  merchant_id: number;
+  name: string;
+  key_prefix: string;
+  key_hash: string;
+  created_at: Generated<Date>;
+  expires_at: Nullable<Date>;
+  last_used_at: Nullable<Date>;
+  revoked_at: Nullable<Date>;
+}
+
 export type FindingSource = 'recovery' | 'reconciliation' | 'webhook';
 
 export interface ReconciliationFindingsTable {
@@ -200,6 +212,7 @@ export interface Database {
   webhook_events: WebhookEventsTable;
   outbox_events: OutboxEventsTable;
   reconciliation_findings: ReconciliationFindingsTable;
+  api_keys: ApiKeysTable;
   schema_migrations: SchemaMigrationsTable;
 }
 
@@ -214,3 +227,4 @@ export type NewIdempotencyKey = Insertable<IdempotencyKeysTable>;
 export type WebhookEvent = Selectable<WebhookEventsTable>;
 export type OutboxEvent = Selectable<OutboxEventsTable>;
 export type ReconciliationFinding = Selectable<ReconciliationFindingsTable>;
+export type ApiKey = Selectable<ApiKeysTable>;

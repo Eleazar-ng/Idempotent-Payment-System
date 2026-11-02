@@ -105,6 +105,13 @@ groups:
 
   - name: edge
     rules:
+      - alert: AuthFailuresSpiking
+        expr: sum(increase(auth_attempts_total{result="invalid"}[10m])) > 50
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: Many requests presented API keys we do not accept. A leaked-then-revoked key still in use, a bad deploy, or someone guessing.
+          runbook: docs/observability.md#auth-failures
       - alert: ProcessorOutcomesUnknown
         expr: sum(rate(processor_calls_total{result="unknown"}[5m])) / sum(rate(processor_calls_total[5m])) > 0.05
         for: 10m

@@ -19,8 +19,8 @@ controllable fake payment processor.
 | 8 | Outbox and a real retry policy (with jitter) | **done** |
 | 9 | Recovery and reconciliation (stuck attempts, missing webhooks) | **done** |
 | 10 | Observability (JSON logs, request ids, metrics, readiness, alerts) | **done** |
-| 11 | Hardening (real auth, merchant webhook URLs, SSRF check) | next |
-| 12 | Final | planned |
+| 11 | Hardening (API keys, merchant webhook URLs, SSRF guard) | **done** |
+| 12 | Final | next |
 
 ## Layout
 
@@ -53,6 +53,7 @@ pnpm lint
 pnpm typecheck
 pnpm build
 
+pnpm admin merchant:create "Acme Ltd"   # makes a merchant and prints its first API key, once
 pnpm start:api              # http://localhost:3000/health
 pnpm start:fake-processor   # http://localhost:3001/health
 pnpm start:worker
@@ -225,9 +226,8 @@ curl -si -XPOST localhost:3001/v1/charges -H 'idempotency-key: demo-1' -H 'conte
 
 ## Create-payment flow (Stage 5)
 
-`POST /v1/payments` (headers `X-Merchant-Id` and `Idempotency-Key`; body `order_id`, `amount` in minor units,
-`currency`, `source`) and `GET /v1/payments/:id`. `X-Merchant-Id` stands in for real authentication (Stage 11);
-every query is already scoped to the merchant.
+`POST /v1/payments` (headers `Authorization: Bearer <api key>` and `Idempotency-Key`; body `order_id`, `amount` in minor units,
+`currency`, `source`) and `GET /v1/payments/:id`. The merchant is whoever the API key belongs to (Stage 11); every query is scoped to it.
 
 ```
 claim the key ──► begin attempt for the order ──► created → calling_processor (committed) ──► call processor
@@ -362,7 +362,7 @@ Rows are immutable once handled (triggers, `PY002` and `PY003`); `DELETE` stays 
 
 - If the processor never sends the webhook (or gives up retrying), the recovery sweeper (Stage 9) asks the processor directly.
 - Conflicts and mismatches become findings (Stage 9) and raise the `WebhookNeedsAttention` alert (Stage 10).
-- One shared secret, no rotation window wired in (`verifyWebhook` already accepts several; configuration comes in Stage 11).
+- Rotation: set `PROCESSOR_WEBHOOK_SECRET_PREVIOUS` while the processor changes its secret and both verify (Stage 11); remove it afterwards.
 - Handling runs inside the HTTP request, on purpose: the work is one database transaction, and putting a queue in front of it would add a second place an event can be lost. (The outbox in Stage 8 is for what we send, not for what we receive.)
 
 ### Deliberate differences from the lectures
@@ -423,9 +423,8 @@ Merchant events: `payment.succeeded` and `payment.failed`, with `payment_id`, `o
 
 ### Known gaps, by design
 
-- Merchants cannot set their own webhook URL through the API yet (the columns exist, migration 0008); real
-  authentication and merchant management come in Stage 11.
-- Nothing stops a merchant registering an internal address as their URL (a server-side request forgery risk). That check belongs to Stage 11.
+- Merchants set their own webhook URL through the API (`/v1/webhook-endpoint`, Stage 11), and both registration and every delivery refuse URLs that point
+  inside the network (SSRF; see docs/security.md).
 - Delivery order between events of one merchant is not guaranteed (a retried event can arrive after a later one);
   every event carries `created` and the full payment facts, so the receiver can tell which is newer.
 - Dead events and a lagging queue raise alerts (`OutboxDeadEvents`, `OutboxLagging`, Stage 10); requeueing is still done by hand.
@@ -536,7 +535,7 @@ Full detail, metric catalogue and runbooks: [docs/observability.md](docs/observa
 ### Known gaps, by design
 
 - No distributed tracing: a request id across two processes is enough for now.
-- `/metrics` is open unless `METRICS_TOKEN` is set; real deployments should also keep it off the public network (Stage 11).
+- `/metrics` is open unless `METRICS_TOKEN` is set; real deployments should also keep it off the public network.
 - The fake processor still logs with `console.log`.
 - Alert thresholds are starting points; they have not met production traffic.
 
@@ -545,6 +544,36 @@ Full detail, metric catalogue and runbooks: [docs/observability.md](docs/observa
 1. Plain `prom-client` and an eighty-line logger instead of a tracing and logging stack.
 2. State gauges are queried at scrape time rather than kept in memory, so they survive restarts and cannot drift.
 3. The worker exposes its own HTTP listener, because a worker nobody can scrape fails silently.
+
+## Hardening (Stage 11)
+
+Full detail, threat reasoning and operating notes: [docs/security.md](docs/security.md).
+
+- **Real authentication.** `X-Merchant-Id`, which only *named* a merchant, is gone. Callers send `Authorization: Bearer <api key>`
+  (`pk_<prefix>_<secret>`, 256 random bits, shown once). Only `SHA-256(key)` is stored (`api_keys`, migration 0010). Checking is constant-time,
+  also for unknown prefixes, and every failure is the same 401; the reason goes to the log (by public prefix) and a metric. Keys can be revoked or expire,
+  neither can be undone (triggers), and a merchant can hold several at once, which is how rotation works.
+- **Operating.** `pnpm admin merchant:create | key:create | key:revoke | key:list`. There is no public sign-up.
+- **Merchant webhook endpoints.** `PUT/GET/DELETE /v1/webhook-endpoint` and `POST /v1/webhook-endpoint/secret`. The signing secret is shown once, when created or rotated.
+- **SSRF guard, two layers.** A pure URL policy at registration and again at delivery (https only, no credentials, no internal names or addresses in any spelling, including
+  IPv4 hidden in IPv6), and a delivery transport that resolves the name itself, requires *every* address to be allowed, connects to the checked address (so DNS rebinding cannot swap it),
+  never follows redirects and never reads the body. A refused destination is dead at once, not retried.
+- **Headers.** `nosniff`, `no-store`, no framework banner.
+- **Dev switches.** `WEBHOOK_ALLOW_HTTP` and `WEBHOOK_ALLOW_PRIVATE_NETWORKS` are `false` in code, `true` in `.env.example`; both processes warn at start-up when either is on.
+
+### Settings
+
+`WEBHOOK_ALLOW_HTTP`, `WEBHOOK_ALLOW_PRIVATE_NETWORKS` (both development only), `PROCESSOR_WEBHOOK_SECRET_PREVIOUS` (rotation window).
+
+### Known gaps, by design
+
+- No rate limiting (do it at the proxy), no key scopes, merchant signing secrets stored in plaintext, no overlap window when a merchant secret rotates, no audit trail beyond logs. See docs/security.md.
+
+### Deliberate differences from the lectures
+
+1. SHA-256, not bcrypt/argon2, for API keys: the secret is 256 random bits, not a human password, so slow hashing buys nothing and costs latency on every request.
+2. One 401 for every authentication failure, so a stranger learns nothing about which keys exist.
+3. The SSRF check runs twice. Registration is advice to the merchant; delivery, against the connected address, is the guard.
 
 ## Why these versions
 

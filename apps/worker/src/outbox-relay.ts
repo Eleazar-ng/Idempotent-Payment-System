@@ -8,8 +8,10 @@ import {
   PLATFORM_SIGNATURE_HEADER,
   retryDelayMs,
   signWebhook,
+  UnsafeUrlError,
+  createSafeFetch,
 } from '@app/payments-core';
-import type { RetryPolicy } from '@app/payments-core';
+import type { Resolver, RetryPolicy, SafeFetchInit, UrlPolicy } from '@app/payments-core';
 import {
   claimDueOutboxEvents,
   markOutboxDead,
@@ -18,6 +20,8 @@ import {
   scheduleOutboxRetry,
 } from '@app/db';
 import type { ClaimedOutboxEvent, Database } from '@app/db';
+
+export type DeliveryFetch = (url: string, init?: SafeFetchInit & { redirect?: 'manual' }) => Promise<Response>;
 
 export interface OutboxRelayOptions {
   /** Most events claimed in one pass. All of them are delivered concurrently. */
@@ -29,7 +33,15 @@ export interface OutboxRelayOptions {
   deliveryTimeoutMs: number;
   /** Spacing between retries of one event. */
   retry: RetryPolicy;
-  fetch?: typeof fetch;
+  /**
+   * Where merchants' URLs may point (Stage 11). Applied at EVERY delivery, to the address actually connected to, not just
+   * when the URL was registered: DNS answers change, and rows can be written without going through the API.
+   */
+  urlPolicy: UrlPolicy;
+  /** DNS lookup, injected so tests control it. Defaults to the system resolver. */
+  resolver?: Resolver;
+  /** Replaces the whole transport (tests only). The default is the SSRF-safe one built from `urlPolicy`. */
+  fetch?: DeliveryFetch;
   /** Injected so tests control time and jitter. */
   now?: () => Date;
   random?: () => number;
@@ -44,6 +56,13 @@ export interface RelaySummary {
   skipped: number;
 }
 
+/** Why a delivery did not succeed. `permanent`: retrying cannot help (the destination is refused by policy). */
+interface Failure {
+  error: string;
+  retryAfterMs?: number;
+  permanent?: boolean;
+}
+
 type Verdict = keyof Omit<RelaySummary, 'claimed'>;
 
 /**
@@ -55,6 +74,8 @@ type Verdict = keyof Omit<RelaySummary, 'claimed'>;
  * one deterministic pass at a time.
  */
 export class OutboxRelay {
+  private readonly deliver: DeliveryFetch;
+
   constructor(
     private readonly db: Kysely<Database>,
     private readonly options: OutboxRelayOptions,
@@ -65,6 +86,7 @@ export class OutboxRelay {
       throw new RangeError('leaseMs must be longer than deliveryTimeoutMs');
     }
     if (options.maxAttempts < 1 || options.batchSize < 1) throw new RangeError('maxAttempts and batchSize must be >= 1');
+    this.deliver = options.fetch ?? createSafeFetch({ policy: options.urlPolicy, resolver: options.resolver });
   }
 
   async runOnce(): Promise<RelaySummary> {
@@ -108,7 +130,7 @@ export class OutboxRelay {
     event: ClaimedOutboxEvent,
     url: string,
     secret: string,
-  ): Promise<{ error: string; retryAfterMs?: number } | undefined> {
+  ): Promise<Failure | undefined> {
     const body = buildMerchantEventBody({
       id: event.id,
       eventType: event.event_type,
@@ -117,7 +139,7 @@ export class OutboxRelay {
     });
     const timestamp = Math.floor(this.now().getTime() / 1000);
     try {
-      const response = await (this.options.fetch ?? fetch)(url, {
+      const response = await this.deliver(url, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -136,13 +158,20 @@ export class OutboxRelay {
         retryAfterMs: parseRetryAfterMs(response.headers.get('retry-after'), this.now().getTime()),
       };
     } catch (error) {
+      // The policy refused this destination. Retrying cannot change that, so it is not retried (see `fail`).
+      if (error instanceof UnsafeUrlError) return { error: `blocked_destination: ${error.reason}`, permanent: true };
       const name = (error as { name?: string }).name;
       if (name === 'TimeoutError' || name === 'AbortError') return { error: 'timeout' };
       return { error: `network: ${(error as Error).message}` };
     }
   }
 
-  private async fail(event: ClaimedOutboxEvent, failure: { error: string; retryAfterMs?: number }): Promise<Verdict> {
+  private async fail(event: ClaimedOutboxEvent, failure: Failure): Promise<Verdict> {
+    if (failure.permanent) {
+      this.log('error', `outbox event ${event.id} is dead: ${failure.error} (merchant ${event.merchant_id})`);
+      await markOutboxDead(this.db, event.id, event.attempts, failure.error);
+      return 'dead';
+    }
     if (event.attempts >= this.options.maxAttempts) {
       this.log('error', `outbox event ${event.id} is dead after ${event.attempts} attempts: ${failure.error}`);
       await markOutboxDead(this.db, event.id, event.attempts, failure.error);

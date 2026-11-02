@@ -63,7 +63,13 @@ export const envSchema = z.object({
   READINESS_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
   /** The worker's own small HTTP listener (/metrics, /health, /health/ready). */
   WORKER_HTTP_PORT: z.coerce.number().int().min(0).max(65535).default(3002),
+  /** DEVELOPMENT ONLY. Lets merchants register http:// webhook URLs. In production leave it false: a signed body over plain http can be read and replayed. */
+  WEBHOOK_ALLOW_HTTP: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  /** DEVELOPMENT ONLY. Lets merchants register localhost and private-network URLs. In production leave it false: it is the SSRF guard. */
+  WEBHOOK_ALLOW_PRIVATE_NETWORKS: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   PROCESSOR_WEBHOOK_SECRET: z.string().min(16, 'PROCESSOR_WEBHOOK_SECRET must be at least 16 chars'),
+  /** Rotation window: a second secret the API ALSO accepts when verifying the processor's signatures. Set it while the processor changes over, then remove it. */
+  PROCESSOR_WEBHOOK_SECRET_PREVIOUS: z.string().min(16, 'PROCESSOR_WEBHOOK_SECRET_PREVIOUS must be at least 16 chars').optional(),
   /** Optional: where the fake processor delivers webhooks at start-up (can also be set at runtime). */
   FAKE_PROCESSOR_WEBHOOK_URL: z.string().min(1).optional(),
 });

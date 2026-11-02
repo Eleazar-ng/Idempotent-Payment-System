@@ -5,7 +5,7 @@ import { sql } from 'kysely';
 import { createDb, DB } from '@app/db';
 import { WEBHOOK_SIGNATURE_HEADER } from '@app/payments-core';
 import { JsonLogger } from '@app/observability';
-import { createMerchant, startMigratedPostgres, TestPostgres, uid } from '@app/testing';
+import { createMerchant, createTestApiKey, startMigratedPostgres, TestPostgres, uid } from '@app/testing';
 import { FakeProcessorModule } from '../../fake-processor/src/fake-processor.module';
 import { ApiModule } from './api.module';
 import { NEST_APP_OPTIONS } from './bootstrap';
@@ -23,6 +23,7 @@ describe('API observability (API + Postgres + fake processor)', () => {
   let api: NestExpressApplication;
   let base: string;
   let merchantId: number;
+  let apiKey: string;
   const extraApps: NestExpressApplication[] = [];
 
   async function startApi(overrides: { token?: string; db?: any } = {}) {
@@ -50,6 +51,7 @@ describe('API observability (API + Postgres + fake processor)', () => {
     api = started.app;
     base = started.url;
     merchantId = await createMerchant(pg.db);
+    apiKey = await createTestApiKey(pg.db, merchantId);
   });
 
   afterAll(async () => {
@@ -63,7 +65,7 @@ describe('API observability (API + Postgres + fake processor)', () => {
   const pay = (body: unknown, key = `key-${uid()}`, headers: Record<string, string> = {}) =>
     fetch(`${base}/v1/payments`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'idempotency-key': key, 'x-merchant-id': String(merchantId), ...headers },
+      headers: { 'content-type': 'application/json', 'idempotency-key': key, authorization: `Bearer ${apiKey}`, ...headers },
       body: JSON.stringify(body),
     });
 
@@ -110,7 +112,7 @@ describe('API observability (API + Postgres + fake processor)', () => {
     it('counts requests by route PATTERN, so ids in the url never become labels', async () => {
       const before = await sample('http_requests_total{method="GET",route="/v1/payments/:id",status_class="4xx"}');
       for (let i = 0; i < 3; i++) {
-        await fetch(`${base}/v1/payments/pay_${uid()}`, { headers: { 'x-merchant-id': String(merchantId) } });
+        await fetch(`${base}/v1/payments/pay_${uid()}`, { headers: { authorization: `Bearer ${apiKey}` } });
       }
       expect(await sample('http_requests_total{method="GET",route="/v1/payments/:id",status_class="4xx"}')).toBe(before + 3);
       const text = await (await fetch(`${base}/metrics`)).text();
@@ -160,6 +162,29 @@ describe('API observability (API + Postgres + fake processor)', () => {
       expect(await sample('processor_calls_total{result="unknown"}')).toBe(unknown + 1);
     });
 
+    it('counts authentication by outcome, and a rejected key is logged by prefix only', async () => {
+      const ok = await sample('auth_attempts_total{result="ok"}');
+      const missing = await sample('auth_attempts_total{result="missing"}');
+      const invalid = await sample('auth_attempts_total{result="invalid"}');
+      const lines: Record<string, unknown>[] = [];
+      Logger.overrideLogger(new JsonLogger({ write: (l) => lines.push(JSON.parse(l)) }));
+      const badKey = `pk_${'1'.repeat(12)}_${'S'.repeat(43)}`;
+      try {
+        await fetch(`${base}/v1/balance`, { headers: { authorization: `Bearer ${apiKey}` } });
+        await fetch(`${base}/v1/balance`);
+        await fetch(`${base}/v1/balance`, { headers: { authorization: `Bearer ${badKey}` } });
+      } finally {
+        Logger.overrideLogger(false);
+      }
+      expect(await sample('auth_attempts_total{result="ok"}')).toBe(ok + 1);
+      expect(await sample('auth_attempts_total{result="missing"}')).toBe(missing + 1);
+      expect(await sample('auth_attempts_total{result="invalid"}')).toBe(invalid + 1);
+      const rejection = lines.find((l) => String(l.message).includes('api key rejected'));
+      expect(rejection?.message).toContain('unknown');
+      expect(rejection?.message).toContain('1'.repeat(12));
+      expect(JSON.stringify(lines)).not.toContain('S'.repeat(43)); // the secret part of a presented key never reaches a log
+    });
+
     it('counts webhooks that fail their signature', async () => {
       const before = await sample('webhook_events_total{result="rejected_signature"}');
       await fetch(`${base}/webhooks/processor`, { method: 'POST', headers: { 'content-type': 'application/json', [WEBHOOK_SIGNATURE_HEADER]: 't=1,v1=00' }, body: '{}' });
@@ -170,6 +195,18 @@ describe('API observability (API + Postgres + fake processor)', () => {
       const res = await fetch(`${base}/metrics`);
       expect(res.headers.get('content-type')).toContain('text/plain');
       expect(await res.text()).toContain('process_cpu_user_seconds_total');
+    });
+  });
+
+  describe('response headers', () => {
+    it('carry no framework banner, forbid sniffing and caching', async () => {
+      const res = await fetch(`${base}/v1/balance`, { headers: { authorization: `Bearer ${apiKey}` } });
+      expect(res.headers.get('x-powered-by')).toBeNull();
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      const missing = await fetch(`${base}/no/such/path`);
+      expect(missing.headers.get('x-powered-by')).toBeNull();
+      expect(missing.headers.get('cache-control')).toBe('no-store');
     });
   });
 

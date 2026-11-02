@@ -13,6 +13,9 @@
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/apps/payments-demo/main",
+    "start:api": "nest start api --watch",
+    "start:worker": "nest start worker --watch",
+    "start:fake-processor": "nest start fake-processor --watch",
     "lint": "oxlint --type-aware src/ test/",
     "test": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js",
     "test:int": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --config jest.config.ts --runInBand",
@@ -20,6 +23,11 @@
     "test:cov": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --coverage",
     "test:debug": "node --inspect-brk --experimental-vm-modules -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --projects \"./apps/payments-demo/test/jest-e2e.json\" \"./apps/api/test/jest-e2e.json\" \"./apps/worker/test/jest-e2e.json\" \"./apps/fake-processor/test/jest-e2e.json\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "db:up": "docker compose up -d --wait",
+    "db:down": "docker compose down",
+    "db:reset": "docker compose down -v && docker compose up -d --wait",
+    "admin": "node --env-file-if-exists=.env -r ts-node/register -r tsconfig-paths/register libs/db/src/admin-cli.ts",
     "db:migrate": "node --env-file-if-exists=.env -r ts-node/register libs/db/src/migrate-cli.ts"
   },
   "dependencies": {

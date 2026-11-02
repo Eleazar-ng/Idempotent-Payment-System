@@ -151,13 +151,15 @@ describe('worker observability (Postgres + fake processor)', () => {
         const line = (await metrics.registry.metrics()).split('\n').find((l) => l.startsWith(`${series} `));
         return line ? Number(line.split(' ')[1]) : 0;
       };
+      // The sweeper and the reconciler both heal the stuck attempt and whichever gets there first counts it (applied vs repaired).
+      const healed = async () => (await read('recovery_actions_total{action="applied"}')) + (await read('recovery_actions_total{action="repaired"}'));
       const deadline = Date.now() + 8000;
-      while (Date.now() < deadline && ((await read('recovery_actions_total{action="applied"}')) < 1 || (await read('reconciliation_findings_recorded_total{kind="amount_mismatch"}')) < 1)) {
+      while (Date.now() < deadline && ((await healed()) < 1 || (await read('reconciliation_findings_recorded_total{kind="amount_mismatch"}')) < 1)) {
         await new Promise((r) => setTimeout(r, 50));
       }
       await service.onApplicationShutdown();
 
-      expect(await read('recovery_actions_total{action="applied"}')).toBeGreaterThanOrEqual(1);
+      expect(await healed()).toBeGreaterThanOrEqual(1);
       expect(await read('recovery_runs_total{job="sweeper",result="ok"}')).toBeGreaterThanOrEqual(1);
       expect(await read('recovery_runs_total{job="reconciler",result="ok"}')).toBeGreaterThanOrEqual(1);
       expect(await read('reconciliation_findings_recorded_total{kind="amount_mismatch"}')).toBeGreaterThanOrEqual(1);

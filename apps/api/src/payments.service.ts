@@ -24,6 +24,7 @@ import { METRICS } from '@app/observability';
 import type { AppMetrics } from '@app/observability';
 import { paymentResult, paymentView, problem } from './payment-http';
 import type { HttpResult } from './payment-http';
+import { AuthService } from './auth.service';
 import { ProcessorClient } from './processor.client';
 
 export const PAYMENT_FLOW_OPTIONS = Symbol('PAYMENT_FLOW_OPTIONS');
@@ -73,11 +74,13 @@ export class PaymentsService {
     private readonly processor: ProcessorClient,
     @Inject(PAYMENT_FLOW_OPTIONS) private readonly options: PaymentFlowOptions,
     @Inject(METRICS) private readonly metrics: AppMetrics,
+    private readonly auth: AuthService,
   ) {}
 
-  async createPayment(input: { merchantId: unknown; idempotencyKey: unknown; body: unknown }): Promise<HttpResult> {
-    const merchantId = await this.authenticate(input.merchantId);
-    if (typeof merchantId !== 'number') return merchantId;
+  async createPayment(input: { authorization: unknown; idempotencyKey: unknown; body: unknown }): Promise<HttpResult> {
+    const auth = await this.auth.authenticate(input.authorization);
+    if (!('merchantId' in auth)) return auth;
+    const { merchantId } = auth;
 
     try {
       assertValidIdempotencyKey(input.idempotencyKey);
@@ -119,9 +122,10 @@ export class PaymentsService {
   }
 
   /** The payment as it is right now (a live read, not the stored snapshot). */
-  async getPayment(merchantIdHeader: unknown, paymentId: string): Promise<HttpResult> {
-    const merchantId = await this.authenticate(merchantIdHeader);
-    if (typeof merchantId !== 'number') return merchantId;
+  async getPayment(authorization: unknown, paymentId: string): Promise<HttpResult> {
+    const auth = await this.auth.authenticate(authorization);
+    if (!('merchantId' in auth)) return auth;
+    const { merchantId } = auth;
 
     const match = /^pay_(\d{1,15})$/.exec(paymentId);
     const record = match ? await getPayment(this.db, merchantId, Number(match[1])) : undefined;
@@ -130,9 +134,10 @@ export class PaymentsService {
   }
 
   /** What the platform owes this merchant, straight from the ledger (never a stored counter). */
-  async getBalance(merchantIdHeader: unknown): Promise<HttpResult> {
-    const merchantId = await this.authenticate(merchantIdHeader);
-    if (typeof merchantId !== 'number') return merchantId;
+  async getBalance(authorization: unknown): Promise<HttpResult> {
+    const auth = await this.auth.authenticate(authorization);
+    if (!('merchantId' in auth)) return auth;
+    const { merchantId } = auth;
 
     const balances = await getMerchantBalances(this.db, merchantId);
     return {
@@ -143,19 +148,6 @@ export class PaymentsService {
   }
 
   // ---------------------------------------------------------------------------------------------
-
-  /**
-   * Stand-in for real authentication (Stage 11): the merchant is named in X-Merchant-Id. The one
-   * rule that matters already holds: every query below is scoped to this merchant.
-   */
-  private async authenticate(header: unknown): Promise<number | HttpResult> {
-    const id = typeof header === 'string' && /^\d{1,15}$/.test(header) ? Number(header) : undefined;
-    const merchant =
-      id === undefined
-        ? undefined
-        : await this.db.selectFrom('merchants').select('id').where('id', '=', id).executeTakeFirst();
-    return merchant ? merchant.id : problem(401, 'unknown_merchant', 'Missing or unknown X-Merchant-Id.');
-  }
 
   private async runClaimed(
     merchantId: number,

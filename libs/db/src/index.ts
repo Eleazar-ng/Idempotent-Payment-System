@@ -13,3 +13,5 @@ export * from './outbox';
 export * from './payment-response';
 export * from './recovery';
 export * from './ops-stats';
+export * from './api-keys';
+export * from './merchant-webhook';
