@@ -20,7 +20,7 @@ controllable fake payment processor.
 | 9 | Recovery and reconciliation (stuck attempts, missing webhooks) | **done** |
 | 10 | Observability (JSON logs, request ids, metrics, readiness, alerts) | **done** |
 | 11 | Hardening (API keys, merchant webhook URLs, SSRF guard) | **done** |
-| 12 | Final | next |
+| 12 | Capstone: the whole system under chaos, and the architecture page | **done** |
 
 ## Layout
 
@@ -574,6 +574,15 @@ Full detail, threat reasoning and operating notes: [docs/security.md](docs/secur
 1. SHA-256, not bcrypt/argon2, for API keys: the secret is 256 random bits, not a human password, so slow hashing buys nothing and costs latency on every request.
 2. One 401 for every authentication failure, so a stranger learns nothing about which keys exist.
 3. The SSRF check runs twice. Registration is advice to the merchant; delivery, against the connected address, is the guard.
+
+## Capstone (Stage 12)
+
+`docs/architecture.md` lists every guarantee, what enforces it, and which test fails if it breaks. The capstone test runs the
+whole system at once under injected failure:
+
+```bash
+pnpm test:int -- apps/api/src/system-chaos.int-spec.ts    # about 13 seconds
+```
 
 ## Why these versions
 
