@@ -17,3 +17,10 @@ export function problem(
 ): HttpResult {
   return { status, body: { error: { code, message }, ...extra }, headers };
 }
+
+/** Writes an HttpResult onto the Express response and returns the body for Nest to serialise. */
+export function sendResult(res: import('express').Response, result: HttpResult): unknown {
+  res.status(result.status);
+  for (const [name, value] of Object.entries(result.headers)) res.setHeader(name, value);
+  return result.body;
+}

@@ -23,6 +23,12 @@ describe('redact', () => {
     expect(scrubText('sent Bearer abc.def-123 and t=1,v1=0123456789abcdef0123456789abcdef')).toBe(`sent Bearer ${REDACTED} and t=1,v1=${REDACTED}`);
   });
 
+  it('keeps only the public prefix of an API key that ends up in text', () => {
+    const key = `pk_0123456789ab_${'S'.repeat(43)}`;
+    expect(scrubText(`header was ${key} today`)).toBe(`header was pk_0123456789ab_${REDACTED} today`);
+    expect(scrubText('prefix pk_0123456789ab is fine')).toBe('prefix pk_0123456789ab is fine');
+  });
+
   it('survives cycles and very deep objects', () => {
     const a: Record<string, unknown> = {};
     a.self = a;
@@ -110,6 +116,7 @@ describe('metrics', () => {
     for (const name of [
       'http_requests_total',
       'http_request_duration_seconds',
+      'auth_attempts_total',
       'idempotency_claims_total',
       'payment_outcomes_total',
       'processor_calls_total',

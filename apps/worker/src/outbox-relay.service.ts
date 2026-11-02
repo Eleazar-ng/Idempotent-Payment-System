@@ -33,6 +33,12 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnApplication
     @Inject(OUTBOX_LOOP_OPTIONS) private readonly options: OutboxLoopOptions,
     @Inject(METRICS) private readonly metrics: AppMetrics,
   ) {
+    const { allowHttp, allowPrivateNetworks } = options.relay.urlPolicy;
+    if (allowHttp || allowPrivateNetworks) {
+      this.logger.warn(
+        `webhook delivery is running with a RELAXED destination policy (allowHttp=${allowHttp}, allowPrivateNetworks=${allowPrivateNetworks}). This is for local development only.`,
+      );
+    }
     this.relay = new OutboxRelay(db, {
       log: (level, message) => this.logger[level](message),
       ...options.relay,

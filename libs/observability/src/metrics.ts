@@ -15,6 +15,9 @@ export interface AppMetrics {
   httpRequests: Counter<'method' | 'route' | 'status_class'>;
   httpDuration: Histogram<'method' | 'route'>;
 
+  // API: authentication
+  authAttempts: Counter<'result'>;
+
   // API: payment flow
   idempotencyClaims: Counter<'result'>;
   paymentOutcomes: Counter<'result'>;
@@ -63,6 +66,12 @@ export function createMetrics(options: { registry?: Registry; defaultMetrics?: b
       ...common,
     }),
 
+    authAttempts: new Counter({
+      name: 'auth_attempts_total',
+      help: 'API authentication attempts: ok, missing (no Authorization header) or invalid (any reason; the log says which).',
+      labelNames: ['result'] as const,
+      ...common,
+    }),
     idempotencyClaims: new Counter({
       name: 'idempotency_claims_total',
       help: 'Outcome of claiming an idempotency key: claimed, replay, in_flight or mismatch.',

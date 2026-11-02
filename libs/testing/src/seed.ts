@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { Kysely, sql } from 'kysely';
-import { enqueuePaymentEvent, postAttemptSuccess } from '../../db/src';
+import { createApiKey, enqueuePaymentEvent, postAttemptSuccess } from '../../db/src';
 import type { Database, PaymentAttemptStatus } from '../../db/src';
 
 /** Short random suffix so tests never collide on unique business keys. */
@@ -185,4 +185,9 @@ export async function postLedgerTransaction(
     }
     return true;
   });
+}
+
+/** A working API key for `merchantId`, as the merchant would hold it. */
+export async function createTestApiKey(db: Kysely<Database>, merchantId: number, name = 'test'): Promise<string> {
+  return (await createApiKey(db, { merchantId, name })).key;
 }

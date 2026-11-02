@@ -36,6 +36,8 @@ describe('loadEnv', () => {
       LOG_LEVEL: 'info',
       READINESS_TIMEOUT_MS: 2000,
       WORKER_HTTP_PORT: 3002,
+      WEBHOOK_ALLOW_HTTP: false,
+      WEBHOOK_ALLOW_PRIVATE_NETWORKS: false,
     });
     expect(env.METRICS_TOKEN).toBeUndefined();
   });
@@ -54,6 +56,22 @@ describe('loadEnv', () => {
     ['RECONCILIATION_LOOKBACK_MS', '-1'],
   ])('refuses %s=%s', (name, value) => {
     expect(() => loadEnv({ ...valid, [name]: value })).toThrow(new RegExp(name));
+  });
+
+  it('accepts an optional previous processor webhook secret for rotation, and refuses a short one', () => {
+    expect(loadEnv(valid).PROCESSOR_WEBHOOK_SECRET_PREVIOUS).toBeUndefined();
+    expect(loadEnv({ ...valid, PROCESSOR_WEBHOOK_SECRET_PREVIOUS: 'previous-secret-0123456789' }).PROCESSOR_WEBHOOK_SECRET_PREVIOUS).toBe('previous-secret-0123456789');
+    expect(() => loadEnv({ ...valid, PROCESSOR_WEBHOOK_SECRET_PREVIOUS: 'short' })).toThrow(/PROCESSOR_WEBHOOK_SECRET_PREVIOUS/);
+  });
+
+  it('turns the development webhook switches on only for exactly "true"', () => {
+    expect(loadEnv({ ...valid, WEBHOOK_ALLOW_HTTP: 'true', WEBHOOK_ALLOW_PRIVATE_NETWORKS: 'true' })).toMatchObject({
+      WEBHOOK_ALLOW_HTTP: true,
+      WEBHOOK_ALLOW_PRIVATE_NETWORKS: true,
+    });
+    for (const value of ['1', 'yes', 'TRUE', '']) {
+      expect(() => loadEnv({ ...valid, WEBHOOK_ALLOW_PRIVATE_NETWORKS: value })).toThrow(/WEBHOOK_ALLOW_PRIVATE_NETWORKS/);
+    }
   });
 
   it.each(['-1', '10001', '1.5'])('refuses a fee of %s basis points', (bps) => {

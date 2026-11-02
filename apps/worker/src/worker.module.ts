@@ -25,6 +25,10 @@ import type { WorkerHttpOptions } from './worker-http.service';
       useFactory: (config: ConfigService<Env, true>): OutboxLoopOptions => ({
         pollIntervalMs: config.get('OUTBOX_POLL_INTERVAL_MS', { infer: true }),
         relay: {
+          urlPolicy: {
+            allowHttp: config.get('WEBHOOK_ALLOW_HTTP', { infer: true }),
+            allowPrivateNetworks: config.get('WEBHOOK_ALLOW_PRIVATE_NETWORKS', { infer: true }),
+          },
           batchSize: config.get('OUTBOX_BATCH_SIZE', { infer: true }),
           maxAttempts: config.get('OUTBOX_MAX_ATTEMPTS', { infer: true }),
           leaseMs: config.get('OUTBOX_LEASE_MS', { infer: true }),

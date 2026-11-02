@@ -2,9 +2,9 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
 import { sql } from 'kysely';
 import type { Kysely } from 'kysely';
-import { checkLedgerInvariants, createDb, DB, findAttemptsMissingOutboxEvent } from '@app/db';
+import { checkLedgerInvariants, createApiKey, createDb, DB, findAttemptsMissingOutboxEvent, revokeApiKey } from '@app/db';
 import type { Database } from '@app/db';
-import { createMerchant, startMigratedPostgres, TestPostgres, uid } from '@app/testing';
+import { createMerchant, createTestApiKey, startMigratedPostgres, TestPostgres, uid } from '@app/testing';
 import { FakeProcessorModule } from '../../fake-processor/src/fake-processor.module';
 import { ApiModule } from './api.module';
 import { PAYMENT_FLOW_OPTIONS } from './payments.service';
@@ -102,18 +102,27 @@ describe('POST /v1/payments (API + Postgres + fake processor)', () => {
     retryAfter: string | null;
   }
 
+  /** One API key per merchant, made on first use. */
+  const keysByMerchant = new Map<number, string>();
+  async function authHeaders(opts: { merchant?: number | null; authorization?: string | null } = {}): Promise<Record<string, string>> {
+    if (opts.authorization !== undefined) return opts.authorization === null ? {} : { authorization: opts.authorization };
+    const merchant = opts.merchant === undefined ? merchantId : opts.merchant;
+    if (merchant === null) return {};
+    if (!keysByMerchant.has(merchant)) keysByMerchant.set(merchant, await createTestApiKey(pg.db, merchant));
+    return { authorization: `Bearer ${keysByMerchant.get(merchant)}` };
+  }
+
   async function pay(
     body: unknown,
-    opts: { key?: string | null; merchant?: number | string | null } = {},
+    opts: { key?: string | null; merchant?: number | null; authorization?: string | null } = {},
   ): Promise<Reply> {
     const key = opts.key === undefined ? `key-${uid()}` : opts.key;
-    const merchant = opts.merchant === undefined ? merchantId : opts.merchant;
     const res = await fetch(`${apiBase}/v1/payments`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         ...(key ? { 'idempotency-key': key } : {}),
-        ...(merchant !== null ? { 'x-merchant-id': String(merchant) } : {}),
+        ...(await authHeaders(opts)),
       },
       body: JSON.stringify(body),
     });
@@ -127,7 +136,7 @@ describe('POST /v1/payments (API + Postgres + fake processor)', () => {
 
   async function getPaymentHttp(id: string, merchant: number | null = merchantId) {
     const res = await fetch(`${apiBase}/v1/payments/${id}`, {
-      headers: merchant === null ? {} : { 'x-merchant-id': String(merchant) },
+      headers: await authHeaders({ merchant }),
     });
     return { status: res.status, body: (await res.json()) as any };
   }
@@ -289,14 +298,52 @@ describe('POST /v1/payments (API + Postgres + fake processor)', () => {
       await noTrace({});
     });
 
+    const WELL_FORMED_UNKNOWN = `Bearer pk_${'0'.repeat(12)}_${'A'.repeat(43)}`;
     it.each([
-      ['no X-Merchant-Id', null],
-      ['an unknown merchant', 987654321],
-      ['a malformed merchant', 'abc'],
-    ])('401 for %s', async (_name, merchant) => {
-      const reply = await pay(newOrder(), { merchant });
+      ['no Authorization header', null],
+      ['a key nobody was ever given', WELL_FORMED_UNKNOWN],
+      ['a malformed key', 'Bearer abc'],
+      ['the wrong scheme', 'Basic dXNlcjpwYXNz'],
+      ['an empty bearer', 'Bearer '],
+    ])('401 for %s, with a challenge, and nothing is created', async (_name, authorization) => {
+      const reply = await pay(newOrder(), { authorization });
       expect(reply.status).toBe(401);
+      expect(['authentication_required', 'invalid_api_key']).toContain(reply.body.error.code);
       await noTrace({});
+    });
+
+    it('the old X-Merchant-Id header no longer identifies anyone', async () => {
+      const res = await fetch(`${apiBase}/v1/payments`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': `key-${uid()}`, 'x-merchant-id': String(merchantId) },
+        body: JSON.stringify(newOrder()),
+      });
+      expect(res.status).toBe(401);
+      expect(res.headers.get('www-authenticate')).toBe('Bearer realm="payments"');
+      await noTrace({});
+    });
+
+    it('a revoked key and an expired one stop working, and the caller cannot tell why', async () => {
+      const revoked = await createApiKey(pg.db, { merchantId, name: 'revoked' });
+      await revokeApiKey(pg.db, revoked.prefix);
+      const expiring = await createApiKey(pg.db, { merchantId, name: 'expiring', expiresAt: new Date(Date.now() + 1500) });
+      const live = await pay(newOrder(), { authorization: `Bearer ${expiring.key}` });
+      expect(live.status).toBe(201);
+      await new Promise((r) => setTimeout(r, 1600));
+
+      const replies = [await pay(newOrder(), { authorization: `Bearer ${revoked.key}` }), await pay(newOrder(), { authorization: `Bearer ${expiring.key}` }), await pay(newOrder(), { authorization: WELL_FORMED_UNKNOWN })];
+      for (const r of replies) expect(r.status).toBe(401);
+      expect(replies[0].body).toEqual(replies[1].body);
+      expect(replies[1].body).toEqual(replies[2].body);
+    });
+
+    it('a key for one merchant cannot act for another: payments land under the key\'s own merchant', async () => {
+      const other = await createMerchant(pg.db);
+      const order = newOrder();
+      const reply = await pay(order, { merchant: other });
+      expect(reply.status).toBe(201);
+      expect(await intentFor(order.order_id, other)).toBeDefined();
+      expect(await intentFor(order.order_id, merchantId)).toBeUndefined();
     });
   });
 
@@ -628,7 +675,7 @@ describe('POST /v1/payments (API + Postgres + fake processor)', () => {
 
     const balance = async (merchant: number | null = merchantId) => {
       const res = await fetch(`${apiBase}/v1/balance`, {
-        headers: merchant === null ? {} : { 'x-merchant-id': String(merchant) },
+        headers: await authHeaders({ merchant }),
       });
       return { status: res.status, body: (await res.json()) as any };
     };
